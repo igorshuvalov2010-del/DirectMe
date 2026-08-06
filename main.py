@@ -5,7 +5,7 @@ import random, time, os, hashlib
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'shugramm-' + str(random.randint(10000,99999)))
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=100*1024*1024)
 
 users = {}
 posts = []
@@ -80,6 +80,7 @@ def sp(data):
     groups['general']['members'].add(name)
     join_room('general')
     emit('ro', {'n': name, 'a': color, 'token': token})
+    emit('nu_user', {'n': name, 'a': color, 'st': 'онлайн'}, broadcast=True)
 
 @socketio.on('li')
 def li(data):
@@ -97,6 +98,7 @@ def li(data):
     users[name]['token'] = token
     join_room('general')
     emit('lo', {'n': name, 'a': users[name].get('au') or users[name]['a'], 'token': token})
+    emit('nu_user', {'n': name, 'a': users[name].get('au') or users[name]['a'], 'st': 'онлайн'}, broadcast=True)
 
 @socketio.on('auto_login')
 def auto_login(data):
@@ -107,6 +109,7 @@ def auto_login(data):
             users[uname]['st'] = 'онлайн'
             join_room('general')
             emit('lo', {'n': uname, 'a': udata.get('au') or udata['a'], 'token': token})
+            emit('nu_user', {'n': uname, 'a': udata.get('au') or udata['a'], 'st': 'онлайн'}, broadcast=True)
             return
 
 @socketio.on('sm')
@@ -127,8 +130,12 @@ def sm(data):
     
     if chat in groups:
         groups[chat]['messages'].append(msg)
+        if len(groups[chat]['messages']) > 200:
+            groups[chat]['messages'] = groups[chat]['messages'][-100:]
     elif chat in private_chats:
         private_chats[chat]['messages'].append(msg)
+        if len(private_chats[chat]['messages']) > 200:
+            private_chats[chat]['messages'] = private_chats[chat]['messages'][-100:]
     
     emit('nm', {'ch': chat, 'm': msg}, room=chat)
     
@@ -150,7 +157,15 @@ def jc(data):
 
 @socketio.on('gu')
 def gu(data):
-    au = [{'n': n, 'a': d.get('au') or d['a'], 'st': d['st']} for n, d in users.items() if n != data.get('n')]
+    name = data.get('n', '')
+    au = []
+    for n, d in users.items():
+        if n != name:
+            au.append({
+                'n': n,
+                'a': d.get('au') or d['a'],
+                'st': d['st']
+            })
     emit('ul', {'u': au})
 
 @socketio.on('sp2')
@@ -165,7 +180,10 @@ def sp2(data):
 
 @socketio.on('ua')
 def ua(data):
-    users[data.get('n')]['au'] = data.get('a', '')
+    name = data.get('n', '')
+    avatar = data.get('a', '')
+    users[name]['au'] = avatar
+    emit('avatar_updated', {'n': name, 'a': avatar}, broadcast=True)
 
 @socketio.on('ub')
 def ub(data):
@@ -179,7 +197,7 @@ def ul2(data):
 def cp(data):
     name = data.get('n')
     content = data.get('m', '')
-    if len(content) > 200000: content = content[:200000]
+    if len(content) > 500000: content = content[:500000]
     post = {
         'id': f"p{len(posts)}_{time.time()}", 'n': name,
         'a': users[name].get('au') or users[name]['a'],
@@ -190,6 +208,7 @@ def cp(data):
     posts.insert(0, post)
     if len(posts) > 50: posts.pop()
     emit('np', {'p': post}, broadcast=True)
+    print(f'Новый пост от {name}, тип: {post["mt"]}, размер: {len(content)}')
 
 @socketio.on('gp')
 def gp():
@@ -229,6 +248,7 @@ def logout(data):
         if udata.get('token') == token:
             udata['token'] = ''
             udata['st'] = 'оффлайн'
+            emit('nu_user', {'n': uname, 'a': udata.get('au') or udata['a'], 'st': 'оффлайн'}, broadcast=True)
             break
 
 HTML = r'''
@@ -271,7 +291,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .msg-row.mine{flex-direction:row-reverse}
 .msg-avatar{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#000;flex-shrink:0;margin-top:auto;overflow:hidden;background:var(--y)}
 .msg-avatar img{width:100%;height:100%;object-fit:cover}
-.msg-bubble{max-width:75%;padding:7px 10px;border-radius:14px;font-size:14px;line-height:1.4;word-wrap:break-word;background:var(--bg3);word-break:break-word}
+.msg-bubble{max-width:75%;padding:7px 10px;border-radius:14px;font-size:14px;line-height:1.4;word-wrap:break-word;overflow-wrap:break-word;white-space:pre-wrap;background:var(--bg3);word-break:break-word}
 .msg-row.mine .msg-bubble{background:var(--y);color:#000}
 .msg-bubble img{max-width:220px;max-height:280px;border-radius:8px;cursor:pointer;display:block;object-fit:cover}
 .msg-bubble video{max-width:220px;max-height:280px;border-radius:8px;display:block}
@@ -337,9 +357,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div class="content" id="usersContent"></div>
 <div class="content" id="postsContent"></div>
 <div class="content" id="settingsContent"></div>
-<div id="chatWindow" class="hidden" style="flex:1;display:none;flex-direction:column">
+<div id="chatWindow" class="hidden" style="flex:1;display:none;flex-direction:column;min-height:0">
 <div class="header"><button class="btn" onclick="closeChat()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><polyline points="15 18 9 12 15 6"/></svg></button><span style="font-weight:500;flex:1" id="chatTitle"></span></div>
-<div id="messages" style="flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:6px 0"></div>
+<div id="messages" style="flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:6px 0;min-height:0"></div>
 <div class="input-bar"><button class="btn" onclick="document.getElementById('fileInput').click()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg></button><input type="text" id="msgInput" placeholder="Сообщение" onkeypress="if(event.key==='Enter')sendMsg()"><button class="send-btn" onclick="sendMsg()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button></div>
 </div>
 <button class="fab" id="fab" onclick="createPost()">+</button>
@@ -381,6 +401,7 @@ s.on('ro',function(d){u=d.n;ua=d.a;token=d.token;localStorage.setItem('shugramm_
 s.on('lo',function(d){u=d.n;ua=d.a;token=d.token;localStorage.setItem('shugramm_token',token);enterApp()})
 s.on('er',function(d){notify(d.m)})
 s.on('notify',function(d){notify(d.n+': '+d.c);loadChats()})
+s.on('avatar_updated',function(d){if(u&&d.n!==u){loadChats();if(document.getElementById('usersContent').classList.contains('active')){s.emit('gu',{n:u})}}})
 function enterApp(){document.getElementById('loginScreen').classList.add('hidden');document.getElementById('nav').style.display='flex';loadChats()}
 function loadChats(){
 var h='<div class="list-item" onclick="openChat(\'general\',\'Общий чат\')"><div class="avatar">#</div><div class="list-info"><div class="list-name">Общий чат</div><div class="list-preview">Нажмите чтобы открыть</div></div></div>';
@@ -423,19 +444,19 @@ function handleFile(e){var f=e.target.files[0];if(!f)return;var r=new FileReader
 function handleAvatar(e){var f=e.target.files[0];if(!f)return;var r=new FileReader();r.onload=function(ev){ua=ev.target.result;s.emit('ua',{n:u,a:ev.target.result});loadSettings()};r.readAsDataURL(f)}
 function handlePost(e){var f=e.target.files[0];if(!f)return;var r=new FileReader();r.onload=function(ev){var c=prompt('Описание:','');s.emit('cp',{n:u,m:ev.target.result,mt:f.type.startsWith('video')?'video':'image',c:c||''})};r.readAsDataURL(f)}
 function createPost(){document.getElementById('postInput').click()}
-s.on('ch',function(d){document.getElementById('messages').innerHTML='';d.ms.forEach(function(m){addMsg(m)});scrollBottom()})
-s.on('nm',function(d){if(d.ch===ch){addMsg(d.m);scrollBottom()}})
+s.on('ch',function(d){document.getElementById('messages').innerHTML='';d.ms.forEach(function(m){addMsg(m)});var mc=document.getElementById('messages');setTimeout(function(){mc.scrollTop=mc.scrollHeight},100)})
+s.on('nm',function(d){if(d.ch===ch){addMsg(d.m);var mc=document.getElementById('messages');setTimeout(function(){mc.scrollTop=mc.scrollHeight},100)}})
 function addMsg(m){
 var c=document.getElementById('messages');var im=m.n===u;var d=document.createElement('div');
 d.className='msg-row '+(im?'mine':'');
-var ct=m.t==='img'?'<img src="'+m.c+'" onclick="viewMedia(\''+m.c+'\',\'img\')">':m.t==='vid'?'<video src="'+m.c+'" controls></video>':m.c.replace(/</g,'&lt;').replace(/\n/g,'<br>');
+var txt=m.c.replace(/</g,'&lt;').replace(/>/g,'&gt;');
+var ct=m.t==='img'?'<img src="'+m.c+'" onclick="viewMedia(\''+m.c+'\',\'img\')" loading="lazy">':m.t==='vid'?'<video src="'+m.c+'" controls preload="none"></video>':txt;
 var av=m.a&&m.a.startsWith('data:')?'<img src="'+m.a+'">':m.n[0];
 d.innerHTML='<div class="msg-avatar">'+av+'</div><div style="max-width:75%"><div class="msg-bubble">'+ct+'</div><div class="msg-time">'+m.ts+'</div></div>';
 c.appendChild(d)
 }
-function scrollBottom(){var c=document.getElementById('messages');setTimeout(function(){c.scrollTop=c.scrollHeight},50)}
 s.on('ul',function(d){
-var h='';d.u.forEach(function(u2){h+='<div class="list-item" onclick="startPrivate(\''+u2.n+'\')"><div class="avatar">'+(u2.a&&u2.a.startsWith('data:')?'<img src="'+u2.a+'">':u2.n[0])+'</div><div class="list-info"><div class="list-name">'+u2.n+'</div><div class="list-preview">'+(u2.st==='онлайн'?'В сети':'Был недавно')+'</div></div></div>'});
+var h='';d.u.forEach(function(u2){var av=u2.a&&u2.a.startsWith('data:')?'<img src="'+u2.a+'">':u2.n[0];h+='<div class="list-item" onclick="startPrivate(\''+u2.n+'\')"><div class="avatar">'+av+'</div><div class="list-info"><div class="list-name">'+u2.n+'</div><div class="list-preview">'+(u2.st==='онлайн'?'В сети':'Был недавно')+'</div></div></div>'});
 document.getElementById('usersContent').innerHTML=h||'<div style="text-align:center;padding:40px;color:var(--g)">Нет контактов</div>'
 })
 function startPrivate(t){s.emit('sp2',{n:u,t:t})}
@@ -443,10 +464,10 @@ s.on('po',function(d){
 ch=d.ch;document.querySelectorAll('.content').forEach(function(c){c.classList.remove('active')});
 document.getElementById('chatWindow').classList.remove('hidden');document.getElementById('chatWindow').style.display='flex';
 document.getElementById('chatTitle').textContent=d.t;document.getElementById('messages').innerHTML='';
-d.ms.forEach(function(m){addMsg(m)});scrollBottom();
+d.ms.forEach(function(m){addMsg(m)});var mc=document.getElementById('messages');setTimeout(function(){mc.scrollTop=mc.scrollHeight},100);
 var chats=JSON.parse(localStorage.getItem('private_chats')||'[]');
-var found=false;for(var i=0;i<chats.length;i++){if(chats[i].id===d.ch){chats[i].lastMsg='';found=true;break}}
-if(!found){chats.push({id:d.ch,name:d.t,avatar:d.a&&d.a.startsWith('data:')?'<img src="'+d.a+'">':d.t[0],lastMsg:''})}
+var found=false;for(var i=0;i<chats.length;i++){if(chats[i].id===d.ch){found=true;break}}
+if(!found){var av=d.a&&d.a.startsWith('data:')?'<img src="'+d.a+'">':d.t[0];chats.push({id:d.ch,name:d.t,avatar:av,lastMsg:''})}
 localStorage.setItem('private_chats',JSON.stringify(chats))
 })
 s.on('pl',function(d){
@@ -456,8 +477,9 @@ document.getElementById('postsContent').innerHTML=h||'<div style="text-align:cen
 s.on('np',function(d){var el=document.getElementById('postsContent');if(el.classList.contains('active'))el.insertAdjacentHTML('afterbegin',buildPost(d.p))})
 s.on('pu',function(d){var el=document.getElementById(d.p.id);if(el)el.outerHTML=buildPost(d.p)})
 function buildPost(p){
-var delBtn=(p.n===u)?'<button class="post-action" onclick="deletePost(\''+p.id+'\')" style="margin-left:auto;color:var(--r)">✕</button>':'';
-return '<div class="post-card" id="'+p.id+'"><div class="post-header"><div class="post-avatar">'+(p.a&&p.a.startsWith('data:')?'<img src="'+p.a+'">':p.n[0])+'</div><div><div class="post-user">'+p.n+'</div><div class="post-date">'+p.ts+'</div></div>'+delBtn+'</div>'+(p.mt==='image'?'<img class="post-media" src="'+p.m+'" onclick="viewMedia(\''+p.m+'\',\'img\')">':'<video class="post-media" src="'+p.m+'" controls></video>')+'<div class="post-actions"><button class="post-action" onclick="likePost(\''+p.id+'\')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg> '+p.l.length+'</button></div><div class="post-caption"><b>'+p.n+'</b> '+p.c+'</div><div class="post-comments">'+p.cm.map(function(c){return '<div class="comment-row"><div class="comment-avatar">'+(c.a&&c.a.startsWith('data:')?'<img src="'+c.a+'">':c.n[0])+'</div><div class="comment-body"><b>'+c.n+'</b> '+c.c+'</div></div>'}).join('')+'</div><div class="comment-input"><input id="ci_'+p.id+'" placeholder="Комментарий..."><button onclick="addComment(\''+p.id+'\')">Отправить</button></div></div>'
+var delBtn=(p.n===u)?'<button class="post-action" onclick="deletePost(\''+p.id+'\')" style="margin-left:auto;color:var(--r);font-size:16px">✕</button>':'';
+var av=p.a&&p.a.startsWith('data:')?'<img src="'+p.a+'">':p.n[0];
+return '<div class="post-card" id="'+p.id+'"><div class="post-header"><div class="post-avatar">'+av+'</div><div><div class="post-user">'+p.n+'</div><div class="post-date">'+p.ts+'</div></div>'+delBtn+'</div>'+(p.mt==='image'?'<img class="post-media" src="'+p.m+'" onclick="viewMedia(\''+p.m+'\',\'img\')" loading="lazy">':'<video class="post-media" src="'+p.m+'" controls preload="none"></video>')+'<div class="post-actions"><button class="post-action" onclick="likePost(\''+p.id+'\')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg> '+p.l.length+'</button></div><div class="post-caption"><b>'+p.n+'</b> '+p.c.replace(/</g,'&lt;')+'</div><div class="post-comments">'+p.cm.map(function(c){var ca=c.a&&c.a.startsWith('data:')?'<img src="'+c.a+'">':c.n[0];return '<div class="comment-row"><div class="comment-avatar">'+ca+'</div><div class="comment-body"><b>'+c.n+'</b> '+c.c.replace(/</g,'&lt;')+'</div></div>'}).join('')+'</div><div class="comment-input"><input id="ci_'+p.id+'" placeholder="Комментарий..."><button onclick="addComment(\''+p.id+'\')">Отправить</button></div></div>'
 }
 function deletePost(pid){
 if(confirm('Удалить пост?')){
