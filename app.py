@@ -7,458 +7,458 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'shugramm-secret-key')
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=100*1024*1024)
 
-# ========== ДАННЫЕ ==========
-пользователи = {}
-посты = []
-группы = {'общий': {'id': 'общий', 'название': 'Общий чат', 'участники': set(), 'сообщения': []}}
-приватные_чаты = {}
-ожидание = {}
-непрочитанные = {}
-печатают = {}
+# ========== DATA ==========
+users = {}
+posts = []
+groups = {'general': {'id': 'general', 'name': 'Общий чат', 'members': set(), 'messages': []}}
+private_chats = {}
+pending = {}
+unread = {}
+typing_users = {}
 
-def хеш_пароля(пароль):
-    соль = os.urandom(32).hex()
-    return соль + ':' + hashlib.sha256((соль + пароль).encode()).hexdigest()
+def hash_password(password):
+    salt = os.urandom(32).hex()
+    return salt + ':' + hashlib.sha256((salt + password).encode()).hexdigest()
 
-def проверить_пароль(пароль, хеш):
-    соль, значение = хеш.split(':')
-    return значение == hashlib.sha256((соль + пароль).encode()).hexdigest()
+def verify_password(password, hashed):
+    salt, hash_value = hashed.split(':')
+    return hash_value == hashlib.sha256((salt + password).encode()).hexdigest()
 
-def сгенерировать_токен():
+def generate_token():
     return hashlib.sha256(str(random.random()).encode()).hexdigest()[:32]
 
-def сохранить_данные():
-    данные = {
-        'пользователи': пользователи,
-        'посты': посты,
-        'группы': {k: {**v, 'участники': list(v['участники'])} for k, v in группы.items()},
-        'приватные_чаты': приватные_чаты,
-        'непрочитанные': непрочитанные
+def save_data():
+    data = {
+        'users': users,
+        'posts': posts,
+        'groups': {k: {**v, 'members': list(v['members'])} for k, v in groups.items()},
+        'private_chats': private_chats,
+        'unread': unread
     }
     with open('shugramm_data.json', 'w') as f:
-        json.dump(данные, f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-def загрузить_данные():
-    global пользователи, посты, группы, приватные_чаты, непрочитанные
+def load_data():
+    global users, posts, groups, private_chats, unread
     try:
         with open('shugramm_data.json', 'r') as f:
-            данные = json.load(f)
-            пользователи = данные.get('пользователи', {})
-            посты = данные.get('посты', [])
-            группы = {k: {**v, 'участники': set(v.get('участники', []))} for k, v in данные.get('группы', {}).items()}
-            приватные_чаты = данные.get('приватные_чаты', {})
-            непрочитанные = данные.get('непрочитанные', {})
+            data = json.load(f)
+            users = data.get('users', {})
+            posts = data.get('posts', [])
+            groups = {k: {**v, 'members': set(v.get('members', []))} for k, v in data.get('groups', {}).items()}
+            private_chats = data.get('private_chats', {})
+            unread = data.get('unread', {})
     except:
         pass
 
-загрузить_данные()
+load_data()
 
-# ========== HTTP МАРШРУТЫ ==========
+# ========== HTTP ROUTES ==========
 @app.route('/')
-def главная():
+def index():
     return render_template_string(HTML)
 
-@app.route('/api/пользователь/<имя>')
-def получить_профиль(имя):
-    if имя not in пользователи:
-        return jsonify({'ошибка': 'Пользователь не найден'}), 404
-    пользователь = пользователи[имя]
-    посты_пользователя = [p for p in посты if p['автор'] == имя]
+@app.route('/api/user/<name>')
+def get_user_profile(name):
+    if name not in users:
+        return jsonify({'error': 'Пользователь не найден'}), 404
+    user = users[name]
+    user_posts = [p for p in posts if p['author'] == name]
     return jsonify({
-        'имя': имя,
-        'аватар': пользователь.get('аватар'),
-        'описание': пользователь.get('описание', ''),
-        'статус': пользователь.get('статус', 'оффлайн'),
-        'посты': посты_пользователя[:20]
+        'name': name,
+        'avatar': user.get('avatar'),
+        'bio': user.get('bio', ''),
+        'status': user.get('status', 'offline'),
+        'posts': user_posts[:20]
     })
 
-@app.route('/удалить_пост', methods=['POST'])
-def удалить_пост():
-    данные = request.get_json()
-    pid = данные.get('pid', '')
-    имя = данные.get('n', '')
-    global посты
-    for i, p in enumerate(посты):
-        if p['id'] == pid and p['автор'] == имя:
-            посты.pop(i)
-            сохранить_данные()
+@app.route('/delete_post', methods=['POST'])
+def delete_post():
+    data = request.get_json()
+    pid = data.get('pid', '')
+    name = data.get('n', '')
+    global posts
+    for i, p in enumerate(posts):
+        if p['id'] == pid and p['author'] == name:
+            posts.pop(i)
+            save_data()
             break
     return {'ok': True}
 
-# ========== SOCKET.IO ==========
+# ========== SOCKET.IO EVENTS ==========
 @socketio.on('connect')
-def подключение():
-    print(f"✅ Клиент: {request.sid}")
+def handle_connect():
+    print(f"✅ Client: {request.sid}")
 
 @socketio.on('disconnect')
-def отключение():
-    for имя, пользователь in пользователи.items():
-        if пользователь.get('sid') == request.sid:
-            пользователь['статус'] = 'оффлайн'
-            пользователь['sid'] = ''
-            emit('статус_пользователя', {'имя': имя, 'статус': 'оффлайн'}, broadcast=True)
-            сохранить_данные()
+def handle_disconnect():
+    for name, user in users.items():
+        if user.get('sid') == request.sid:
+            user['status'] = 'offline'
+            user['sid'] = ''
+            emit('user_status', {'name': name, 'status': 'offline'}, broadcast=True)
+            save_data()
             break
 
-@socketio.on('регистрация')
-def регистрация(данные):
-    телефон = ''.join(filter(str.isdigit, данные.get('телефон', '')))
-    if len(телефон) < 10:
-        emit('ошибка', {'сообщение': 'Введите корректный номер'})
+@socketio.on('register')
+def register(data):
+    phone = ''.join(filter(str.isdigit, data.get('phone', '')))
+    if len(phone) < 10:
+        emit('error', {'message': 'Введите корректный номер'})
         return
-    код = str(random.randint(100000, 999999))
-    ожидание[телефон] = {'код': код, 'время': time.time()}
-    print(f"📱 Код {телефон}: {код}")
-    emit('код_отправлен', {'телефон': телефон, 'код': код})
+    code = str(random.randint(100000, 999999))
+    pending[phone] = {'code': code, 'time': time.time()}
+    print(f"📱 Code {phone}: {code}")
+    emit('code_sent', {'phone': phone, 'code': code})
 
-@socketio.on('проверить_код')
-def проверить_код(данные):
-    телефон = данные.get('телефон', '')
-    код = данные.get('код', '')
-    if телефон not in ожидание:
-        emit('ошибка', {'сообщение': 'Сессия истекла'})
+@socketio.on('verify_code')
+def verify_code(data):
+    phone = data.get('phone', '')
+    code = data.get('code', '')
+    if phone not in pending:
+        emit('error', {'message': 'Сессия истекла'})
         return
-    if time.time() - ожидание[телефон]['время'] > 300:
-        del ожидание[телефон]
-        emit('ошибка', {'сообщение': 'Код истек'})
+    if time.time() - pending[phone]['time'] > 300:
+        del pending[phone]
+        emit('error', {'message': 'Код истек'})
         return
-    if код != ожидание[телефон]['код']:
-        emit('ошибка', {'сообщение': 'Неверный код'})
+    if code != pending[phone]['code']:
+        emit('error', {'message': 'Неверный код'})
         return
-    del ожидание[телефон]
-    for имя, пользователь in пользователи.items():
-        if пользователь.get('телефон') == телефон:
-            emit('пользователь_существует', {'имя': имя})
+    del pending[phone]
+    for name, user in users.items():
+        if user.get('phone') == phone:
+            emit('user_exists', {'name': name})
             return
-    emit('новый_пользователь', {'телефон': телефон})
+    emit('new_user', {'phone': phone})
 
-@socketio.on('создать_пользователя')
-def создать_пользователя(данные):
-    телефон = данные.get('телефон', '')
-    имя = данные.get('имя', '').strip()
-    пароль = данные.get('пароль', '')
+@socketio.on('create_user')
+def create_user(data):
+    phone = data.get('phone', '')
+    name = data.get('name', '').strip()
+    password = data.get('password', '')
     
-    if not имя or len(имя) < 2 or len(имя) > 20:
-        emit('ошибка', {'сообщение': 'Имя 2-20 символов'})
+    if not name or len(name) < 2 or len(name) > 20:
+        emit('error', {'message': 'Имя 2-20 символов'})
         return
-    if not re.match(r'^[a-zA-Zа-яА-Я0-9_]+$', имя):
-        emit('ошибка', {'сообщение': 'Недопустимые символы'})
+    if not re.match(r'^[a-zA-Zа-яА-Я0-9_]+$', name):
+        emit('error', {'message': 'Недопустимые символы'})
         return
-    if имя in пользователи:
-        emit('ошибка', {'сообщение': 'Пользователь уже существует'})
+    if name in users:
+        emit('error', {'message': 'Пользователь уже существует'})
         return
-    if len(пароль) < 4:
-        emit('ошибка', {'сообщение': 'Пароль минимум 4 символа'})
+    if len(password) < 4:
+        emit('error', {'message': 'Пароль минимум 4 символа'})
         return
     
-    токен = сгенерировать_токен()
-    пользователи[имя] = {
+    token = generate_token()
+    users[name] = {
         'sid': request.sid,
-        'телефон': телефон,
-        'пароль': хеш_пароля(пароль),
-        'аватар': None,
-        'статус': 'онлайн',
-        'описание': '',
-        'токен': токен,
-        'последний_визит': time.time()
+        'phone': phone,
+        'password': hash_password(password),
+        'avatar': None,
+        'status': 'online',
+        'bio': '',
+        'token': token,
+        'last_seen': time.time()
     }
-    группы['общий']['участники'].add(имя)
-    непрочитанные[имя] = {}
-    сохранить_данные()
-    join_room('общий')
-    emit('вход_успешен', {'имя': имя, 'токен': токен, 'аватар': None})
-    emit('пользователь_вошел', {'имя': имя, 'аватар': None, 'статус': 'онлайн'}, broadcast=True)
+    groups['general']['members'].add(name)
+    unread[name] = {}
+    save_data()
+    join_room('general')
+    emit('login_success', {'name': name, 'token': token, 'avatar': None})
+    emit('user_joined', {'name': name, 'avatar': None, 'status': 'online'}, broadcast=True)
 
-@socketio.on('вход')
-def вход(данные):
-    имя = данные.get('имя', '').strip()
-    пароль = данные.get('пароль', '')
-    if имя not in пользователи:
-        emit('ошибка', {'сообщение': 'Пользователь не найден'})
+@socketio.on('login')
+def login(data):
+    name = data.get('name', '').strip()
+    password = data.get('password', '')
+    if name not in users:
+        emit('error', {'message': 'Пользователь не найден'})
         return
-    if not проверить_пароль(пароль, пользователи[имя]['пароль']):
-        emit('ошибка', {'сообщение': 'Неверный пароль'})
+    if not verify_password(password, users[name]['password']):
+        emit('error', {'message': 'Неверный пароль'})
         return
-    токен = сгенерировать_токен()
-    пользователи[имя]['sid'] = request.sid
-    пользователи[имя]['статус'] = 'онлайн'
-    пользователи[имя]['токен'] = токен
-    пользователи[имя]['последний_визит'] = time.time()
-    сохранить_данные()
-    join_room('общий')
-    emit('вход_успешен', {'имя': имя, 'токен': токен, 'аватар': пользователи[имя].get('аватар')})
-    emit('пользователь_вошел', {'имя': имя, 'аватар': пользователи[имя].get('аватар'), 'статус': 'онлайн'}, broadcast=True)
+    token = generate_token()
+    users[name]['sid'] = request.sid
+    users[name]['status'] = 'online'
+    users[name]['token'] = token
+    users[name]['last_seen'] = time.time()
+    save_data()
+    join_room('general')
+    emit('login_success', {'name': name, 'token': token, 'avatar': users[name].get('avatar')})
+    emit('user_joined', {'name': name, 'avatar': users[name].get('avatar'), 'status': 'online'}, broadcast=True)
 
-@socketio.on('авто_вход')
-def авто_вход(данные):
-    токен = данные.get('токен', '')
-    for имя, пользователь in пользователи.items():
-        if пользователь.get('токен') == токен:
-            пользователь['sid'] = request.sid
-            пользователь['статус'] = 'онлайн'
-            пользователь['последний_визит'] = time.time()
-            сохранить_данные()
-            join_room('общий')
-            emit('вход_успешен', {'имя': имя, 'токен': токен, 'аватар': пользователь.get('аватар')})
-            emit('пользователь_вошел', {'имя': имя, 'аватар': пользователь.get('аватар'), 'статус': 'онлайн'}, broadcast=True)
+@socketio.on('auto_login')
+def auto_login(data):
+    token = data.get('token', '')
+    for name, user in users.items():
+        if user.get('token') == token:
+            user['sid'] = request.sid
+            user['status'] = 'online'
+            user['last_seen'] = time.time()
+            save_data()
+            join_room('general')
+            emit('login_success', {'name': name, 'token': token, 'avatar': user.get('avatar')})
+            emit('user_joined', {'name': name, 'avatar': user.get('avatar'), 'status': 'online'}, broadcast=True)
             return
 
-@socketio.on('отправить_сообщение')
-def отправить_сообщение(данные):
-    имя = данные.get('имя', '')
-    чат = данные.get('чат', 'общий')
-    тип = данные.get('тип', 'текст')
-    содержимое = данные.get('содержимое', '')
+@socketio.on('send_message')
+def send_message(data):
+    name = data.get('name', '')
+    chat = data.get('chat', 'general')
+    msg_type = data.get('type', 'text')
+    content = data.get('content', '')
     
-    if имя not in пользователи:
+    if name not in users:
         return
     
-    if тип == 'текст':
-        содержимое = содержимое[:2000]
-    elif тип in ['изображение', 'видео']:
-        содержимое = содержимое[:150000]
+    if msg_type == 'text':
+        content = content[:2000]
+    elif msg_type in ['image', 'video']:
+        content = content[:150000]
     
-    сообщение = {
+    msg = {
         'id': f"m{int(time.time()*1000)}",
-        'имя': имя,
-        'тип': тип,
-        'содержимое': содержимое,
-        'время': datetime.now().strftime("%H:%M"),
-        'аватар': пользователи[имя].get('аватар'),
-        'время_отправки': time.time()
+        'name': name,
+        'type': msg_type,
+        'content': content,
+        'time': datetime.now().strftime("%H:%M"),
+        'avatar': users[name].get('avatar'),
+        'timestamp': time.time()
     }
     
-    if чат in группы:
-        группы[чат]['сообщения'].append(сообщение)
-        if len(группы[чат]['сообщения']) > 200:
-            группы[чат]['сообщения'] = группы[чат]['сообщения'][-100:]
-    elif чат in приватные_чаты:
-        приватные_чаты[чат]['сообщения'].append(сообщение)
-        if len(приватные_чаты[чат]['сообщения']) > 200:
-            приватные_чаты[чат]['сообщения'] = приватные_чаты[чат]['сообщения'][-100:]
+    if chat in groups:
+        groups[chat]['messages'].append(msg)
+        if len(groups[chat]['messages']) > 200:
+            groups[chat]['messages'] = groups[chat]['messages'][-100:]
+    elif chat in private_chats:
+        private_chats[chat]['messages'].append(msg)
+        if len(private_chats[chat]['messages']) > 200:
+            private_chats[chat]['messages'] = private_chats[chat]['messages'][-100:]
     
-    сохранить_данные()
-    emit('новое_сообщение', {'чат': чат, 'сообщение': сообщение}, room=чат)
+    save_data()
+    emit('new_message', {'chat': chat, 'message': msg}, room=chat)
     
-    if чат in приватные_чаты:
-        for участник in приватные_чаты[чат]['участники']:
-            if участник != имя:
-                непрочитанные.setdefault(участник, {})
-                непрочитанные[участник][чат] = непрочитанные[участник].get(чат, 0) + 1
-                if пользователи.get(участник, {}).get('sid'):
-                    emit('обновить_непрочитанные', {'чат': чат, 'количество': непрочитанные[участник][чат]}, room=пользователи[участник]['sid'])
+    if chat in private_chats:
+        for member in private_chats[chat]['users']:
+            if member != name:
+                unread.setdefault(member, {})
+                unread[member][chat] = unread[member].get(chat, 0) + 1
+                if users.get(member, {}).get('sid'):
+                    emit('unread_update', {'chat': chat, 'count': unread[member][chat]}, room=users[member]['sid'])
     else:
-        for участник in группы[чат]['участники']:
-            if участник != имя:
-                непрочитанные.setdefault(участник, {})
-                непрочитанные[участник][чат] = непрочитанные[участник].get(чат, 0) + 1
-                if пользователи.get(участник, {}).get('sid'):
-                    emit('обновить_непрочитанные', {'чат': чат, 'количество': непрочитанные[участник][чат]}, room=пользователи[участник]['sid'])
+        for member in groups[chat]['members']:
+            if member != name:
+                unread.setdefault(member, {})
+                unread[member][chat] = unread[member].get(chat, 0) + 1
+                if users.get(member, {}).get('sid'):
+                    emit('unread_update', {'chat': chat, 'count': unread[member][chat]}, room=users[member]['sid'])
 
-@socketio.on('присоединиться_к_чату')
-def присоединиться_к_чату(данные):
-    чат = данные.get('чат', 'общий')
-    имя = данные.get('имя', '')
-    if имя not in пользователи:
+@socketio.on('join_chat')
+def join_chat(data):
+    chat = data.get('chat', 'general')
+    name = data.get('name', '')
+    if name not in users:
         return
-    join_room(чат)
-    if имя in непрочитанные:
-        непрочитанные[имя][чат] = 0
-    сообщения = группы.get(чат, {}).get('сообщения', [])[-100:] if чат in группы else приватные_чаты.get(чат, {}).get('сообщения', [])[-100:]
-    emit('история_чата', {'сообщения': сообщения, 'чат': чат})
+    join_room(chat)
+    if name in unread:
+        unread[name][chat] = 0
+    msgs = groups.get(chat, {}).get('messages', [])[-100:] if chat in groups else private_chats.get(chat, {}).get('messages', [])[-100:]
+    emit('chat_history', {'messages': msgs, 'chat': chat})
 
-@socketio.on('печатает')
-def печатает(данные):
-    чат = данные.get('чат', 'общий')
-    имя = данные.get('имя', '')
-    печатает = данные.get('печатает', False)
-    печатают[чат] = печатают.get(чат, {})
-    if печатает:
-        печатают[чат][имя] = time.time()
+@socketio.on('typing')
+def typing(data):
+    chat = data.get('chat', 'general')
+    name = data.get('name', '')
+    is_typing = data.get('typing', False)
+    typing_users[chat] = typing_users.get(chat, {})
+    if is_typing:
+        typing_users[chat][name] = time.time()
     else:
-        печатают[чат].pop(имя, None)
-    emit('статус_печатает', {'имя': имя, 'печатает': печатает}, room=чат, include_self=False)
+        typing_users[chat].pop(name, None)
+    emit('typing_status', {'name': name, 'typing': is_typing}, room=chat, include_self=False)
 
-@socketio.on('получить_пользователей')
-def получить_пользователей(данные):
-    имя = данные.get('имя', '')
-    список = []
-    for n, u in пользователи.items():
-        if n != имя:
-            список.append({
-                'имя': n,
-                'аватар': u.get('аватар'),
-                'статус': u.get('статус', 'оффлайн'),
-                'описание': u.get('описание', '')
+@socketio.on('get_users')
+def get_users(data):
+    name = data.get('name', '')
+    user_list = []
+    for n, u in users.items():
+        if n != name:
+            user_list.append({
+                'name': n,
+                'avatar': u.get('avatar'),
+                'status': u.get('status', 'offline'),
+                'bio': u.get('bio', '')
             })
-    emit('список_пользователей', {'пользователи': список})
+    emit('users_list', {'users': user_list})
 
-@socketio.on('начать_приватный_чат')
-def начать_приватный_чат(данные):
-    пользователь1 = данные.get('пользователь1', '')
-    пользователь2 = данные.get('пользователь2', '')
-    if пользователь1 not in пользователи or пользователь2 not in пользователи:
+@socketio.on('start_private_chat')
+def start_private_chat(data):
+    user1 = data.get('user1', '')
+    user2 = data.get('user2', '')
+    if user1 not in users or user2 not in users:
         return
-    id_чата = f"p_{min(пользователь1, пользователь2)}_{max(пользователь1, пользователь2)}"
-    if id_чата not in приватные_чаты:
-        приватные_чаты[id_чата] = {'участники': [пользователь1, пользователь2], 'сообщения': []}
-        сохранить_данные()
-    join_room(id_чата)
-    if пользователь1 in непрочитанные:
-        непрочитанные[пользователь1][id_чата] = 0
-    сообщения = приватные_чаты[id_чата]['сообщения'][-100:]
-    emit('приватный_чат', {
-        'id_чата': id_чата,
-        'пользователь': пользователь2,
-        'аватар': пользователи[пользователь2].get('аватар'),
-        'сообщения': сообщения
+    chat_id = f"p_{min(user1, user2)}_{max(user1, user2)}"
+    if chat_id not in private_chats:
+        private_chats[chat_id] = {'users': [user1, user2], 'messages': []}
+        save_data()
+    join_room(chat_id)
+    if user1 in unread:
+        unread[user1][chat_id] = 0
+    msgs = private_chats[chat_id]['messages'][-100:]
+    emit('private_chat', {
+        'chat_id': chat_id,
+        'user': user2,
+        'avatar': users[user2].get('avatar'),
+        'messages': msgs
     })
 
-@socketio.on('обновить_аватар')
-def обновить_аватар(данные):
-    имя = данные.get('имя', '')
-    аватар = данные.get('аватар', '')
-    if имя in пользователи:
-        пользователи[имя]['аватар'] = аватар
-        сохранить_данные()
-        emit('аватар_обновлен', {'имя': имя, 'аватар': аватар}, broadcast=True)
+@socketio.on('update_avatar')
+def update_avatar(data):
+    name = data.get('name', '')
+    avatar = data.get('avatar', '')
+    if name in users:
+        users[name]['avatar'] = avatar
+        save_data()
+        emit('avatar_updated', {'name': name, 'avatar': avatar}, broadcast=True)
 
-@socketio.on('обновить_описание')
-def обновить_описание(данные):
-    имя = данные.get('имя', '')
-    описание = данные.get('описание', '')[:200]
-    if имя in пользователи:
-        пользователи[имя]['описание'] = описание
-        сохранить_данные()
-        emit('описание_обновлено', {'имя': имя, 'описание': описание})
+@socketio.on('update_bio')
+def update_bio(data):
+    name = data.get('name', '')
+    bio = data.get('bio', '')[:200]
+    if name in users:
+        users[name]['bio'] = bio
+        save_data()
+        emit('bio_updated', {'name': name, 'bio': bio})
 
-@socketio.on('создать_пост')
-def создать_пост(данные):
-    имя = данные.get('имя', '')
-    содержимое = данные.get('содержимое', '')
-    тип_медиа = данные.get('тип_медиа', 'изображение')
-    описание = данные.get('описание', '')[:500]
+@socketio.on('create_post')
+def create_post(data):
+    name = data.get('name', '')
+    content = data.get('content', '')
+    media_type = data.get('media_type', 'image')
+    caption = data.get('caption', '')[:500]
     
-    if имя not in пользователи:
+    if name not in users:
         return
-    if len(содержимое) > 500000:
-        содержимое = содержимое[:500000]
+    if len(content) > 500000:
+        content = content[:500000]
     
-    пост = {
-        'id': f"p{len(посты)}_{int(time.time()*1000)}",
-        'автор': имя,
-        'аватар': пользователи[имя].get('аватар'),
-        'содержимое': содержимое,
-        'тип_медиа': тип_медиа,
-        'описание': описание,
-        'лайки': [],
-        'комментарии': [],
-        'время': datetime.now().strftime("%d.%m.%Y %H:%M"),
-        'время_отправки': time.time()
+    post = {
+        'id': f"p{len(posts)}_{int(time.time()*1000)}",
+        'author': name,
+        'avatar': users[name].get('avatar'),
+        'content': content,
+        'media_type': media_type,
+        'caption': caption,
+        'likes': [],
+        'comments': [],
+        'time': datetime.now().strftime("%d.%m.%Y %H:%M"),
+        'timestamp': time.time()
     }
-    посты.insert(0, пост)
-    if len(посты) > 50:
-        посты.pop()
-    сохранить_данные()
-    emit('новый_пост', {'пост': пост}, broadcast=True)
+    posts.insert(0, post)
+    if len(posts) > 50:
+        posts.pop()
+    save_data()
+    emit('new_post', {'post': post}, broadcast=True)
 
-@socketio.on('получить_посты')
-def получить_посты():
-    emit('список_постов', {'посты': посты[:30]})
+@socketio.on('get_posts')
+def get_posts():
+    emit('posts_list', {'posts': posts[:30]})
 
-@socketio.on('лайкнуть_пост')
-def лайкнуть_пост(данные):
-    id_поста = данные.get('id_поста', '')
-    имя = данные.get('имя', '')
-    for p in посты:
-        if p['id'] == id_поста:
-            if имя in p['лайки']:
-                p['лайки'].remove(имя)
+@socketio.on('like_post')
+def like_post(data):
+    post_id = data.get('post_id', '')
+    name = data.get('name', '')
+    for p in posts:
+        if p['id'] == post_id:
+            if name in p['likes']:
+                p['likes'].remove(name)
             else:
-                p['лайки'].append(имя)
-            сохранить_данные()
-            emit('пост_обновлен', {'пост': p}, broadcast=True)
+                p['likes'].append(name)
+            save_data()
+            emit('post_updated', {'post': p}, broadcast=True)
             break
 
-@socketio.on('комментировать_пост')
-def комментировать_пост(данные):
-    id_поста = данные.get('id_поста', '')
-    имя = данные.get('имя', '')
-    комментарий = данные.get('комментарий', '')[:300]
-    for p in посты:
-        if p['id'] == id_поста:
-            p['комментарии'].append({
-                'имя': имя,
-                'аватар': пользователи.get(имя, {}).get('аватар'),
-                'комментарий': комментарий,
-                'время': datetime.now().strftime("%H:%M")
+@socketio.on('comment_post')
+def comment_post(data):
+    post_id = data.get('post_id', '')
+    name = data.get('name', '')
+    comment = data.get('comment', '')[:300]
+    for p in posts:
+        if p['id'] == post_id:
+            p['comments'].append({
+                'name': name,
+                'avatar': users.get(name, {}).get('avatar'),
+                'comment': comment,
+                'time': datetime.now().strftime("%H:%M")
             })
-            сохранить_данные()
-            emit('пост_обновлен', {'пост': p}, broadcast=True)
+            save_data()
+            emit('post_updated', {'post': p}, broadcast=True)
             break
 
-@socketio.on('выход')
-def выход(данные):
-    токен = данные.get('токен', '')
-    for имя, пользователь in пользователи.items():
-        if пользователь.get('токен') == токен:
-            пользователь['токен'] = ''
-            пользователь['статус'] = 'оффлайн'
-            пользователь['sid'] = ''
-            сохранить_данные()
-            emit('статус_пользователя', {'имя': имя, 'статус': 'оффлайн'}, broadcast=True)
+@socketio.on('logout')
+def logout(data):
+    token = data.get('token', '')
+    for name, user in users.items():
+        if user.get('token') == token:
+            user['token'] = ''
+            user['status'] = 'offline'
+            user['sid'] = ''
+            save_data()
+            emit('user_status', {'name': name, 'status': 'offline'}, broadcast=True)
             break
 
-@socketio.on('удалить_сообщение')
-def удалить_сообщение(данные):
-    чат = данные.get('чат', '')
-    id_сообщения = данные.get('id_сообщения', '')
-    имя = данные.get('имя', '')
+@socketio.on('delete_message')
+def delete_message(data):
+    chat = data.get('chat', '')
+    msg_id = data.get('msg_id', '')
+    name = data.get('name', '')
     
-    if чат in группы:
-        сообщения = группы[чат]['сообщения']
-        for i, m in enumerate(сообщения):
-            if m['id'] == id_сообщения and m['имя'] == имя:
-                сообщения.pop(i)
-                сохранить_данные()
-                emit('сообщение_удалено', {'чат': чат, 'id_сообщения': id_сообщения}, room=чат)
+    if chat in groups:
+        msgs = groups[chat]['messages']
+        for i, m in enumerate(msgs):
+            if m['id'] == msg_id and m['name'] == name:
+                msgs.pop(i)
+                save_data()
+                emit('message_deleted', {'chat': chat, 'msg_id': msg_id}, room=chat)
                 break
-    elif чат in приватные_чаты:
-        сообщения = приватные_чаты[чат]['сообщения']
-        for i, m in enumerate(сообщения):
-            if m['id'] == id_сообщения and m['имя'] == имя:
-                сообщения.pop(i)
-                сохранить_данные()
-                emit('сообщение_удалено', {'чат': чат, 'id_сообщения': id_сообщения}, room=чат)
+    elif chat in private_chats:
+        msgs = private_chats[chat]['messages']
+        for i, m in enumerate(msgs):
+            if m['id'] == msg_id and m['name'] == name:
+                msgs.pop(i)
+                save_data()
+                emit('message_deleted', {'chat': chat, 'msg_id': msg_id}, room=chat)
                 break
 
-@socketio.on('редактировать_сообщение')
-def редактировать_сообщение(данные):
-    чат = данные.get('чат', '')
-    id_сообщения = данные.get('id_сообщения', '')
-    имя = данные.get('имя', '')
-    новое_содержимое = данные.get('содержимое', '')[:2000]
+@socketio.on('edit_message')
+def edit_message(data):
+    chat = data.get('chat', '')
+    msg_id = data.get('msg_id', '')
+    name = data.get('name', '')
+    new_content = data.get('content', '')[:2000]
     
-    if чат in группы:
-        for m in группы[чат]['сообщения']:
-            if m['id'] == id_сообщения and m['имя'] == имя:
-                m['содержимое'] = новое_содержимое
-                m['отредактировано'] = True
-                сохранить_данные()
-                emit('сообщение_отредактировано', {'чат': чат, 'сообщение': m}, room=чат)
+    if chat in groups:
+        for m in groups[chat]['messages']:
+            if m['id'] == msg_id and m['name'] == name:
+                m['content'] = new_content
+                m['edited'] = True
+                save_data()
+                emit('message_edited', {'chat': chat, 'message': m}, room=chat)
                 break
-    elif чат in приватные_чаты:
-        for m in приватные_чаты[чат]['сообщения']:
-            if m['id'] == id_сообщения and m['имя'] == имя:
-                m['содержимое'] = новое_содержимое
-                m['отредактировано'] = True
-                сохранить_данные()
-                emit('сообщение_отредактировано', {'чат': чат, 'сообщение': m}, room=чат)
+    elif chat in private_chats:
+        for m in private_chats[chat]['messages']:
+            if m['id'] == msg_id and m['name'] == name:
+                m['content'] = new_content
+                m['edited'] = True
+                save_data()
+                emit('message_edited', {'chat': chat, 'message': m}, room=chat)
                 break
 
-@socketio.on('поделиться_ссылкой')
-def поделиться_ссылкой():
-    emit('поделиться_ссылкой', {'url': request.host})
+@socketio.on('share_link')
+def share_link():
+    emit('share_link', {'url': request.host})
 
 # ========== HTML ==========
 HTML = '''
@@ -612,163 +612,162 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div id="app">
 <div class="header">
 <div class="header-title">⚡ Shugramm</div>
-<button class="btn" onclick="поделиться()">📤</button>
+<button class="btn" onclick="shareApp()">📤</button>
 </div>
 <div class="page active" id="pageChats"><div id="chatList"></div></div>
-<div class="page" id="pageUsers"><div style="padding:8px 12px;position:sticky;top:0;background:var(--bg);z-index:5"><input class="form-input" id="searchUsers" placeholder="🔍 Поиск..." oninput="поискПользователей()" style="text-align:left"></div><div id="usersList"></div></div>
+<div class="page" id="pageUsers"><div style="padding:8px 12px;position:sticky;top:0;background:var(--bg);z-index:5"><input class="form-input" id="searchUsers" placeholder="🔍 Поиск..." oninput="searchUsers()" style="text-align:left"></div><div id="usersList"></div></div>
 <div class="page" id="pagePosts"><div id="postsList"></div></div>
 <div class="page" id="pageSettings"><div id="settingsContent"></div></div>
 <div id="chatWindow">
 <div class="header" style="border-bottom:1px solid var(--border);flex-shrink:0">
-<button class="btn" onclick="закрытьЧат()">←</button>
+<button class="btn" onclick="closeChat()">←</button>
 <span style="font-weight:500;flex:1;font-size:15px" id="chatTitle">Чат</span>
-<button class="btn" onclick="удалитьЧат()">🗑</button>
+<button class="btn" onclick="deleteChat()">🗑</button>
 </div>
 <div class="messages-container" id="messagesContainer"></div>
 <div class="typing-indicator" id="typingIndicator"></div>
 <div class="input-bar">
 <button class="btn" onclick="document.getElementById('fileInput').click()">📎</button>
-<input type="text" id="msgInput" placeholder="Сообщение..." onkeypress="if(event.key==='Enter')отправитьСообщение()" oninput="печатает()">
-<button class="send-btn" onclick="отправитьСообщение()">➤</button>
+<input type="text" id="msgInput" placeholder="Сообщение..." onkeypress="if(event.key==='Enter')sendMessage()" oninput="handleTyping()">
+<button class="send-btn" onclick="sendMessage()">➤</button>
 </div>
 </div>
 <div class="nav" id="nav" style="display:none">
-<div class="nav-item active" onclick="переключитьВкладку('чаты')"><span class="icon">💬</span><span class="label">Чаты</span><span class="badge" id="totalBadge" style="display:none">0</span></div>
-<div class="nav-item" onclick="переключитьВкладку('люди')"><span class="icon">👤</span><span class="label">Люди</span></div>
-<div class="nav-item" onclick="переключитьВкладку('посты')"><span class="icon">📸</span><span class="label">Посты</span></div>
-<div class="nav-item" onclick="переключитьВкладку('настройки')"><span class="icon">⚙️</span><span class="label">Настройки</span></div>
+<div class="nav-item active" onclick="switchPage('chats')"><span class="icon">💬</span><span class="label">Чаты</span><span class="badge" id="totalBadge" style="display:none">0</span></div>
+<div class="nav-item" onclick="switchPage('users')"><span class="icon">👤</span><span class="label">Люди</span></div>
+<div class="nav-item" onclick="switchPage('posts')"><span class="icon">📸</span><span class="label">Посты</span></div>
+<div class="nav-item" onclick="switchPage('settings')"><span class="icon">⚙️</span><span class="label">Настройки</span></div>
 </div>
-<button class="fab" id="fab" onclick="создатьПост()">+</button>
+<button class="fab" id="fab" onclick="createPost()">+</button>
 </div>
-<div class="profile-modal" id="profileModal"><div class="profile-modal-content"><button class="profile-modal-close" onclick="закрытьПрофиль()">✕</button><div id="profileContent"></div></div></div>
-<div class="media-viewer" id="mediaViewer"><button class="media-close" onclick="закрытьМедиа()">✕</button><img id="mediaImg" style="display:none"><video id="mediaVideo" controls style="display:none"></video></div>
-<input type="file" id="fileInput" accept="image/*,video/*" style="display:none" onchange="обработатьФайл(event)">
-<input type="file" id="avatarInput" accept="image/*" style="display:none" onchange="обработатьАватар(event)">
-<input type="file" id="postInput" accept="image/*,video/*" style="display:none" onchange="обработатьПост(event)">
+<div class="profile-modal" id="profileModal"><div class="profile-modal-content"><button class="profile-modal-close" onclick="closeProfile()">✕</button><div id="profileContent"></div></div></div>
+<div class="media-viewer" id="mediaViewer"><button class="media-close" onclick="closeMedia()">✕</button><img id="mediaImg" style="display:none"><video id="mediaVideo" controls style="display:none"></video></div>
+<input type="file" id="fileInput" accept="image/*,video/*" style="display:none" onchange="handleFile(event)">
+<input type="file" id="avatarInput" accept="image/*" style="display:none" onchange="handleAvatar(event)">
+<input type="file" id="postInput" accept="image/*,video/*" style="display:none" onchange="handlePost(event)">
 <div class="login-screen" id="loginScreen">
 <div class="login-card">
-<div id="loginStep1"><div class="login-logo">⚡</div><h1>Shugramm</h1><p>Введите номер телефона</p><input class="form-input" id="phoneInput" placeholder="+7 999 123-45-67" type="tel"><button class="form-btn" onclick="запроситьКод()">Получить код</button></div>
-<div id="loginStep2" class="hidden"><div class="login-logo">⚡</div><h1>Код</h1><p>Отправлен на <span id="phoneDisplay" style="color:var(--gold)"></span></p><div class="code-box" id="codeDisplay">000000</div><input class="form-input" id="codeInput" placeholder="••••••" maxlength="6" style="font-size:20px;letter-spacing:6px"><button class="form-btn" onclick="проверитьКод()">Подтвердить</button><button class="form-link" onclick="назадКТелефону()">Изменить номер</button></div>
-<div id="loginStep3" class="hidden"><div class="login-logo">⚡</div><h1>Регистрация</h1><input class="form-input" id="regPassword" placeholder="Пароль (мин. 4)" type="password"><input class="form-input" id="regName" placeholder="Имя (2-20 символов)"><button class="form-btn" onclick="зарегистрироваться()">Зарегистрироваться</button></div>
-<div id="loginStep4" class="hidden"><div class="login-logo">⚡</div><h1>Вход</h1><p id="loginName" style="color:var(--gold);font-weight:600"></p><input class="form-input" id="loginPassword" placeholder="Пароль" type="password"><button class="form-btn" onclick="войти()">Войти</button><button class="form-link" onclick="назадКСтарту()">Назад</button></div>
+<div id="loginStep1"><div class="login-logo">⚡</div><h1>Shugramm</h1><p>Введите номер телефона</p><input class="form-input" id="phoneInput" placeholder="+7 999 123-45-67" type="tel"><button class="form-btn" onclick="requestCode()">Получить код</button></div>
+<div id="loginStep2" class="hidden"><div class="login-logo">⚡</div><h1>Код</h1><p>Отправлен на <span id="phoneDisplay" style="color:var(--gold)"></span></p><div class="code-box" id="codeDisplay">000000</div><input class="form-input" id="codeInput" placeholder="••••••" maxlength="6" style="font-size:20px;letter-spacing:6px"><button class="form-btn" onclick="verifyCode()">Подтвердить</button><button class="form-link" onclick="backToPhone()">Изменить номер</button></div>
+<div id="loginStep3" class="hidden"><div class="login-logo">⚡</div><h1>Регистрация</h1><input class="form-input" id="regPassword" placeholder="Пароль (мин. 4)" type="password"><input class="form-input" id="regName" placeholder="Имя (2-20 символов)"><button class="form-btn" onclick="registerUser()">Зарегистрироваться</button></div>
+<div id="loginStep4" class="hidden"><div class="login-logo">⚡</div><h1>Вход</h1><p id="loginName" style="color:var(--gold);font-weight:600"></p><input class="form-input" id="loginPassword" placeholder="Пароль" type="password"><button class="form-btn" onclick="loginUser()">Войти</button><button class="form-link" onclick="backToStart()">Назад</button></div>
 </div>
 </div>
 <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
 <script>
 const socket=io();
-let текущийПользователь=null,текущийТокен=null,текущийЧат='общий',текущееНазваниеЧата='Общий чат';
-let текущийАватар=null,текущееОписание='',таймаутПечатания=null,чатОткрыт=false;
-let непрочитанныеДанные={},приватныеЧаты=JSON.parse(localStorage.getItem('приватные_чаты')||'[]');
+let currentUser=null,currentToken=null,currentChat='general',currentChatName='Общий чат';
+let currentAvatar=null,currentBio='',typingTimeout=null,isChatOpen=false;
+let unreadData={},privateChats=JSON.parse(localStorage.getItem('private_chats')||'[]');
 const $=id=>document.getElementById(id);
-const уведомление=$('notification');
-function показатьУведомление(msg){уведомление.textContent=msg;уведомление.classList.add('show');clearTimeout(уведомление._таймаут);уведомление._таймаут=setTimeout(()=>уведомление.classList.remove('show'),3000);}
-function показатьТост(msg){const el=document.createElement('div');el.style.cssText='position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--bg2);padding:10px 20px;border-radius:10px;font-size:13px;z-index:60;border-left:3px solid var(--gold);box-shadow:0 4px 20px rgba(0,0,0,.6);animation:fadeIn .3s ease;max-width:90%';el.textContent=msg;document.body.appendChild(el);setTimeout(()=>el.remove(),2500);}
-function запроситьКод(){const p=$('phoneInput').value.trim();if(p.length<10){показатьУведомление('Введите корректный номер');return}socket.emit('регистрация',{телефон:p});}
-function проверитьКод(){const c=$('codeInput').value.trim();if(c.length!==6){показатьУведомление('Введите 6 цифр');return}socket.emit('проверить_код',{телефон:текущийТелефон,код:c});}
-let текущийТелефон='';
-function зарегистрироваться(){const имя=$('regName').value.trim(),пароль=$('regPassword').value.trim();if(!имя||имя.length<2||имя.length>20){показатьУведомление('Имя 2-20 символов');return}if(!/^[a-zA-Zа-яА-Я0-9_]+$/.test(имя)){показатьУведомление('Недопустимые символы');return}if(пароль.length<4){показатьУведомление('Пароль минимум 4 символа');return}socket.emit('создать_пользователя',{телефон:текущийТелефон,имя,пароль});}
-function войти(){const p=$('loginPassword').value.trim();if(!p){показатьУведомление('Введите пароль');return}socket.emit('вход',{имя:текущееИмяВхода,пароль:p});}
-let текущееИмяВхода='';
-function назадКТелефону(){$('loginStep2').classList.add('hidden');$('loginStep1').classList.remove('hidden');}
-function назадКСтарту(){$('loginStep4').classList.add('hidden');$('loginStep1').classList.remove('hidden');}
-socket.on('код_отправлен',(d)=>{текущийТелефон=d.телефон;$('loginStep1').classList.add('hidden');$('loginStep2').classList.remove('hidden');$('phoneDisplay').textContent='+'+d.телефон;$('codeDisplay').textContent=d.код;});
-socket.on('пользователь_существует',(d)=>{текущееИмяВхода=d.имя;$('loginStep2').classList.add('hidden');$('loginStep4').classList.remove('hidden');$('loginName').textContent=d.имя;});
-socket.on('новый_пользователь',(d)=>{текущийТелефон=d.телефон;$('loginStep2').classList.add('hidden');$('loginStep3').classList.remove('hidden');});
-socket.on('вход_успешен',(d)=>{текущийПользователь=d.имя;текущийТокен=d.токен;текущийАватар=d.аватар;localStorage.setItem('shugramm_токен',d.токен);localStorage.setItem('shugramm_пользователь',d.имя);войтиВПриложение();});
-socket.on('ошибка',(d)=>{показатьУведомление(d.сообщение);});
-socket.on('пользователь_вошел',()=>{отобразитьЧаты();отобразитьПользователей();});
-socket.on('статус_пользователя',()=>{отобразитьЧаты();отобразитьПользователей();});
-socket.on('новое_сообщение',(d)=>{if(d.чат===текущийЧат&&чатОткрыт){отобразитьСообщение(d.сообщение);скроллВниз();}if(d.чат!==текущийЧат||!чатОткрыт){непрочитанныеДанные[d.чат]=(непрочитанныеДанные[d.чат]||0)+1;обновитьБейдж();}отобразитьЧаты();});
-socket.on('история_чата',(d)=>{$('messagesContainer').innerHTML='';if(d.сообщения)d.сообщения.forEach(m=>отобразитьСообщение(m));скроллВниз();});
-socket.on('статус_печатает',(d)=>{if(d.печатает){$('typingIndicator').textContent=d.имя+' печатает...';$('typingIndicator').classList.add('show');}else{$('typingIndicator').classList.remove('show');}});
-socket.on('список_пользователей',(d)=>{отобразитьСписокПользователей(d.пользователи);});
-socket.on('приватный_чат',(d)=>{открытьПриватныйЧат(d.id_чата,d.пользователь,d.аватар,d.сообщения);});
-socket.on('аватар_обновлен',(d)=>{if(d.имя===текущийПользователь)текущийАватар=d.аватар;отобразитьЧаты();отобразитьПользователей();});
-socket.on('описание_обновлено',(d)=>{if(d.имя===текущийПользователь){текущееОписание=d.описание;отобразитьНастройки();}});
-socket.on('новый_пост',(d)=>{if($('pagePosts').classList.contains('active')){$('postsList').insertAdjacentHTML('afterbegin',отобразитьПост(d.пост));}});
-socket.on('список_постов',(d)=>{$('postsList').innerHTML=d.посты.length?d.посты.map(p=>отобразитьПост(p)).join(''):'<div class="empty-state"><div class="icon">📸</div><h3>Нет постов</h3><p>Создайте свой первый пост!</p></div>';});
-socket.on('пост_обновлен',(d)=>{const el=document.getElementById('post-'+d.пост.id);if(el)el.outerHTML=отобразитьПост(d.пост);});
-socket.on('сообщение_удалено',(d)=>{if(d.чат===текущийЧат){const el=document.querySelector('[data-msg-id="'+d.id_сообщения+'"]');if(el)el.remove();}});
-socket.on('сообщение_отредактировано',(d)=>{if(d.чат===текущийЧат){const el=document.querySelector('[data-msg-id="'+d.сообщение.id+'"]');if(el){const b=el.querySelector('.msg-bubble');if(b)b.innerHTML=d.сообщение.содержимое+'<span class="edited">✎</span>';}}});
-socket.on('поделиться_ссылкой',(d)=>{const url='https://'+d.url;if(navigator.clipboard){navigator.clipboard.writeText(url).then(()=>показатьТост('Ссылка скопирована!'));}else{prompt('Ссылка:',url);}});
-socket.on('обновить_непрочитанные',(d)=>{непрочитанныеДанные[d.чат]=d.количество;отобразитьЧаты();обновитьБейдж();});
-const сохраненныйТокен=localStorage.getItem('shugramm_токен');
-if(сохраненныйТокен)socket.emit('авто_вход',{токен:сохраненныйТокен});
-function войтиВПриложение(){$('loginScreen').classList.add('hidden');$('nav').style.display='flex';загрузитьДанные();отобразитьЧаты();отобразитьПользователей();отобразитьНастройки();socket.emit('получить_посты');}
-function загрузитьДанные(){приватныеЧаты=JSON.parse(localStorage.getItem('приватные_чаты')||'[]');}
-function переключитьВкладку(страница){
+const notification=$('notification');
+function showNotification(msg){notification.textContent=msg;notification.classList.add('show');clearTimeout(notification._timeout);notification._timeout=setTimeout(()=>notification.classList.remove('show'),3000);}
+function showToast(msg){const el=document.createElement('div');el.style.cssText='position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--bg2);padding:10px 20px;border-radius:10px;font-size:13px;z-index:60;border-left:3px solid var(--gold);box-shadow:0 4px 20px rgba(0,0,0,.6);animation:fadeIn .3s ease;max-width:90%';el.textContent=msg;document.body.appendChild(el);setTimeout(()=>el.remove(),2500);}
+function requestCode(){const p=$('phoneInput').value.trim();if(p.length<10){showNotification('Введите корректный номер');return}socket.emit('register',{phone:p});}
+function verifyCode(){const c=$('codeInput').value.trim();if(c.length!==6){showNotification('Введите 6 цифр');return}socket.emit('verify_code',{phone:currentPhone,code:c});}
+let currentPhone='';
+function registerUser(){const name=$('regName').value.trim(),password=$('regPassword').value.trim();if(!name||name.length<2||name.length>20){showNotification('Имя 2-20 символов');return}if(!/^[a-zA-Zа-яА-Я0-9_]+$/.test(name)){showNotification('Недопустимые символы');return}if(password.length<4){showNotification('Пароль минимум 4 символа');return}socket.emit('create_user',{phone:currentPhone,name,password});}
+function loginUser(){const p=$('loginPassword').value.trim();if(!p){showNotification('Введите пароль');return}socket.emit('login',{name:currentLoginName,password:p});}
+let currentLoginName='';
+function backToPhone(){$('loginStep2').classList.add('hidden');$('loginStep1').classList.remove('hidden');}
+function backToStart(){$('loginStep4').classList.add('hidden');$('loginStep1').classList.remove('hidden');}
+socket.on('code_sent',(d)=>{currentPhone=d.phone;$('loginStep1').classList.add('hidden');$('loginStep2').classList.remove('hidden');$('phoneDisplay').textContent='+'+d.phone;$('codeDisplay').textContent=d.code;});
+socket.on('user_exists',(d)=>{currentLoginName=d.name;$('loginStep2').classList.add('hidden');$('loginStep4').classList.remove('hidden');$('loginName').textContent=d.name;});
+socket.on('new_user',(d)=>{currentPhone=d.phone;$('loginStep2').classList.add('hidden');$('loginStep3').classList.remove('hidden');});
+socket.on('login_success',(d)=>{currentUser=d.name;currentToken=d.token;currentAvatar=d.avatar;localStorage.setItem('shugramm_token',d.token);localStorage.setItem('shugramm_user',d.name);enterApp();});
+socket.on('error',(d)=>{showNotification(d.message);});
+socket.on('user_joined',()=>{renderChats();renderUsers();});
+socket.on('user_status',()=>{renderChats();renderUsers();});
+socket.on('new_message',(d)=>{if(d.chat===currentChat&&isChatOpen){renderMessage(d.message);scrollToBottom();}if(d.chat!==currentChat||!isChatOpen){unreadData[d.chat]=(unreadData[d.chat]||0)+1;updateBadge();}renderChats();});
+socket.on('chat_history',(d)=>{$('messagesContainer').innerHTML='';if(d.messages)d.messages.forEach(m=>renderMessage(m));scrollToBottom();});
+socket.on('typing_status',(d)=>{if(d.typing){$('typingIndicator').textContent=d.name+' печатает...';$('typingIndicator').classList.add('show');}else{$('typingIndicator').classList.remove('show');}});
+socket.on('users_list',(d)=>{renderUsersList(d.users);});
+socket.on('private_chat',(d)=>{openPrivateChatData(d.chat_id,d.user,d.avatar,d.messages);});
+socket.on('avatar_updated',(d)=>{if(d.name===currentUser)currentAvatar=d.avatar;renderChats();renderUsers();});
+socket.on('bio_updated',(d)=>{if(d.name===currentUser){currentBio=d.bio;renderSettings();}});
+socket.on('new_post',(d)=>{if($('pagePosts').classList.contains('active')){$('postsList').insertAdjacentHTML('afterbegin',renderPost(d.post));}});
+socket.on('posts_list',(d)=>{$('postsList').innerHTML=d.posts.length?d.posts.map(p=>renderPost(p)).join(''):'<div class="empty-state"><div class="icon">📸</div><h3>Нет постов</h3><p>Создайте свой первый пост!</p></div>';});
+socket.on('post_updated',(d)=>{const el=document.getElementById('post-'+d.post.id);if(el)el.outerHTML=renderPost(d.post);});
+socket.on('message_deleted',(d)=>{if(d.chat===currentChat){const el=document.querySelector('[data-msg-id="'+d.msg_id+'"]');if(el)el.remove();}});
+socket.on('message_edited',(d)=>{if(d.chat===currentChat){const el=document.querySelector('[data-msg-id="'+d.message.id+'"]');if(el){const b=el.querySelector('.msg-bubble');if(b)b.innerHTML=d.message.content+'<span class="edited">✎</span>';}}});
+socket.on('share_link',(d)=>{const url='https://'+d.url;if(navigator.clipboard){navigator.clipboard.writeText(url).then(()=>showToast('Ссылка скопирована!'));}else{prompt('Ссылка:',url);}});
+socket.on('unread_update',(d)=>{unreadData[d.chat]=d.count;renderChats();updateBadge();});
+const savedToken=localStorage.getItem('shugramm_token');
+if(savedToken)socket.emit('auto_login',{token:savedToken});
+function enterApp(){$('loginScreen').classList.add('hidden');$('nav').style.display='flex';loadData();renderChats();renderUsers();renderSettings();socket.emit('get_posts');}
+function loadData(){privateChats=JSON.parse(localStorage.getItem('private_chats')||'[]');}
+function switchPage(page){
 document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
 document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
 $('fab').classList.remove('show');
-if(страница==='чаты'){$('pageChats').classList.add('active');document.querySelector('.nav-item:nth-child(1)').classList.add('active');отобразитьЧаты();}
-else if(страница==='люди'){$('pageUsers').classList.add('active');document.querySelector('.nav-item:nth-child(2)').classList.add('active');socket.emit('получить_пользователей',{имя:текущийПользователь});}
-else if(страница==='посты'){$('pagePosts').classList.add('active');document.querySelector('.nav-item:nth-child(3)').classList.add('active');$('fab').classList.add('show');socket.emit('получить_посты');}
-else{$('pageSettings').classList.add('active');document.querySelector('.nav-item:nth-child(4)').classList.add('active');отобразитьНастройки();}
-if(чатОткрыт){$('chatWindow').classList.remove('open');$('chatWindow').style.display='none';чатОткрыт=false;}
+if(page==='chats'){$('pageChats').classList.add('active');document.querySelector('.nav-item:nth-child(1)').classList.add('active');renderChats();}
+else if(page==='users'){$('pageUsers').classList.add('active');document.querySelector('.nav-item:nth-child(2)').classList.add('active');socket.emit('get_users',{name:currentUser});}
+else if(page==='posts'){$('pagePosts').classList.add('active');document.querySelector('.nav-item:nth-child(3)').classList.add('active');$('fab').classList.add('show');socket.emit('get_posts');}
+else{$('pageSettings').classList.add('active');document.querySelector('.nav-item:nth-child(4)').classList.add('active');renderSettings();}
+if(isChatOpen){$('chatWindow').classList.remove('open');$('chatWindow').style.display='none';isChatOpen=false;}
 }
-function отобразитьЧаты(){
-let html='<div class="chat-item" onclick="открытьЧат(\'общий\',\'Общий чат\')"><div class="chat-avatar">#</div><div class="chat-info"><div class="chat-name">Общий чат</div><div class="chat-last">'+получитьПоследнееСообщение('общий')+'</div></div>'+(непрочитанныеДанные['общий']?'<div class="chat-unread">'+непрочитанныеДанные['общий']+'</div>':'')+'</div>';
-приватныеЧаты.forEach(c=>{const ur=непрочитанныеДанные[c.id]||0;html+='<div class="chat-item" onclick="открытьПриватныйЧат(\''+c.id+'\',\''+c.имя+'\')"><div class="chat-avatar">'+(c.аватар||c.имя[0])+'</div><div class="chat-info"><div class="chat-name">'+c.имя+'</div><div class="chat-last">'+получитьПоследнееСообщение(c.id)+'</div></div>'+(ur?'<div class="chat-unread">'+ur+'</div>':'')+'</div>';});
-$('chatList').innerHTML=html;обновитьБейдж();
+function renderChats(){
+let html='<div class="chat-item" onclick="openChat(\'general\',\'Общий чат\')"><div class="chat-avatar">#</div><div class="chat-info"><div class="chat-name">Общий чат</div><div class="chat-last">'+getLastMessage('general')+'</div></div>'+(unreadData['general']?'<div class="chat-unread">'+unreadData['general']+'</div>':'')+'</div>';
+privateChats.forEach(c=>{const ur=unreadData[c.id]||0;html+='<div class="chat-item" onclick="openPrivateChat(\''+c.id+'\',\''+c.name+'\')"><div class="chat-avatar">'+(c.avatar||c.name[0])+'</div><div class="chat-info"><div class="chat-name">'+c.name+'</div><div class="chat-last">'+getLastMessage(c.id)+'</div></div>'+(ur?'<div class="chat-unread">'+ur+'</div>':'')+'</div>';});
+$('chatList').innerHTML=html;updateBadge();
 }
-function получитьПоследнееСообщение(idЧата){
-let сообщения=[];if(idЧата==='общий'){сообщения=window._кешСообщений?.общий||[];}else{const чат=приватныеЧаты.find(c=>c.id===idЧата);if(чат)сообщения=чат.сообщения||[];}
-if(!сообщения||сообщения.length===0)return'Начните общение';
-const последнее=сообщения[сообщения.length-1];let текст='';
-if(последнее.имя===текущийПользователь)текст='Вы: ';
-if(последнее.тип==='текст')текст+=последнее.содержимое;
-else if(последнее.тип==='изображение')текст+='📎 Фото';
-else if(последнее.тип==='видео')текст+='📎 Видео';
-else текст+='📎 Медиа';
-return текст;
+function getLastMessage(chatId){
+let messages=[];if(chatId==='general'){messages=window._messagesCache?.general||[];}else{const chat=privateChats.find(c=>c.id===chatId);if(chat)messages=chat.messages||[];}
+if(!messages||messages.length===0)return'Начните общение';
+const last=messages[messages.length-1];let text='';
+if(last.name===currentUser)text='Вы: ';
+if(last.type==='text')text+=last.content;
+else if(last.type==='image')text+='📎 Фото';
+else if(last.type==='video')text+='📎 Видео';
+else text+='📎 Медиа';
+return text;
 }
-function отобразитьПользователей(){socket.emit('получить_пользователей',{имя:текущийПользователь});}
-function отобразитьСписокПользователей(пользователи){
-if(!пользователи||!пользователи.length){$('usersList').innerHTML='<div class="empty-state"><div class="icon">👤</div><h3>Нет пользователей</h3></div>';return;}
-$('usersList').innerHTML=пользователи.map(u=>'<div class="chat-item" onclick="начатьПриватныйЧат(\''+u.имя+'\')"><div class="chat-avatar">'+(u.аватар?'<img src="'+u.аватар+'">':u.имя[0])+(u.статус==='онлайн'?'<span class="online-dot"></span>':'')+'</div><div class="chat-info"><div class="chat-name">'+u.имя+'</div><div class="chat-last">'+(u.описание||'Привет!')+'</div></div></div>').join('');
+function renderUsers(){socket.emit('get_users',{name:currentUser});}
+function renderUsersList(users){
+if(!users||!users.length){$('usersList').innerHTML='<div class="empty-state"><div class="icon">👤</div><h3>Нет пользователей</h3></div>';return;}
+$('usersList').innerHTML=users.map(u=>'<div class="chat-item" onclick="startPrivateChat(\''+u.name+'\')"><div class="chat-avatar">'+(u.avatar?'<img src="'+u.avatar+'">':u.name[0])+(u.status==='online'?'<span class="online-dot"></span>':'')+'</div><div class="chat-info"><div class="chat-name">'+u.name+'</div><div class="chat-last">'+(u.bio||'Привет!')+'</div></div></div>').join('');
 }
-function поискПользователей(){const q=$('searchUsers').value.toLowerCase();document.querySelectorAll('#usersList .chat-item').forEach(el=>{const имя=el.querySelector('.chat-name').textContent.toLowerCase();el.style.display=имя.includes(q)?'flex':'none';});}
-function открытьЧат(чат,название){текущийЧат=чат;текущееНазваниеЧата=название;чатОткрыт=true;document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));$('chatWindow').classList.add('open');$('chatWindow').style.display='flex';$('chatTitle').textContent=название;$('messagesContainer').innerHTML='';if(непрочитанныеДанные[чат]){непрочитанныеДанные[чат]=0;обновитьБейдж();}socket.emit('присоединиться_к_чату',{чат,имя:текущийПользователь});$('msgInput').focus();}
-function открытьПриватныйЧат(idЧата,имя){текущийЧат=idЧата;текущееНазваниеЧата=имя;чатОткрыт=true;document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));$('chatWindow').classList.add('open');$('chatWindow').style.display='flex';$('chatTitle').textContent=имя;$('messagesContainer').innerHTML='';if(непрочитанныеДанные[idЧата]){непрочитанныеДанные[idЧата]=0;обновитьБейдж();}socket.emit('присоединиться_к_чату',{чат:idЧата,имя:текущийПользователь});$('msgInput').focus();}
-function начатьПриватныйЧат(имя){if(имя===текущийПользователь)return;socket.emit('начать_приватный_чат',{пользователь1:текущийПользователь,пользователь2:имя});}
-function открытьПриватныйЧатДанные(idЧата,пользователь,аватар,сообщения){текущийЧат=idЧата;текущееНазваниеЧата=пользователь;чатОткрыт=true;document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));$('chatWindow').classList.add('open');$('chatWindow').style.display='flex';$('chatTitle').textContent=пользователь;$('messagesContainer').innerHTML='';if(сообщения){сообщения.forEach(m=>отобразитьСообщение(m));скроллВниз();}const существует=приватныеЧаты.some(c=>c.id===idЧата);if(!существует){приватныеЧаты.push({id:idЧата,имя:пользователь,аватар:аватар||пользователь[0],сообщения:сообщения||[]});localStorage.setItem('приватные_чаты',JSON.stringify(приватныеЧаты));}if(непрочитанныеДанные[idЧата]){непрочитанныеДанные[idЧата]=0;обновитьБейдж();}$('msgInput').focus();}
-function закрытьЧат(){$('chatWindow').classList.remove('open');$('chatWindow').style.display='none';чатОткрыт=false;$('pageChats').classList.add('active');document.querySelector('.nav-item:nth-child(1)').classList.add('active');отобразитьЧаты();}
-function удалитьЧат(){if(!confirm('Удалить чат из списка?'))return;приватныеЧаты=приватныеЧаты.filter(c=>c.id!==текущийЧат);localStorage.setItem('приватные_чаты',JSON.stringify(приватныеЧаты));закрытьЧат();}
-function отправитьСообщение(){const текст=$('msgInput').value.trim();if(!текст)return;socket.emit('отправить_сообщение',{имя:текущийПользователь,чат:текущийЧат,тип:'текст',содержимое:текст});$('msgInput').value='';socket.emit('печатает',{чат:текущийЧат,имя:текущийПользователь,печатает:false});}
-function печатает(){if(таймаутПечатания)clearTimeout(таймаутПечатания);socket.emit('печатает',{чат:текущийЧат,имя:текущийПользователь,печатает:true});таймаутПечатания=setTimeout(()=>{socket.emit('печатает',{чат:текущийЧат,имя:текущийПользователь,печатает:false});},1500);}
-function обработатьФайл(e){const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=(ev)=>{socket.emit('отправить_сообщение',{имя:текущийПользователь,чат:текущийЧат,тип:f.type.startsWith('video')?'видео':'изображение',содержимое:ev.target.result});};r.readAsDataURL(f);e.target.value='';}
-function отобразитьСообщение(msg){const isSelf=msg.имя===текущийПользователь;const div=document.createElement('div');div.className='msg'+(isSelf?' self':'');div.dataset.msgId=msg.id;let содержимое=msg.содержимое;if(msg.тип==='изображение'){содержимое='<img src="'+msg.содержимое+'" onclick="открытьМедиа(\''+msg.содержимое+'\',\'image\')">';}else if(msg.тип==='видео'){содержимое='<video src="'+msg.содержимое+'" controls></video>';}else{содержимое=msg.содержимое.replace(/</g,'&lt;').replace(/>/g,'&gt;');}const аватар=msg.аватар?'<img src="'+msg.аватар+'">':msg.имя[0];const действия=isSelf?'<div class="msg-actions"><button onclick="редактироватьСообщение(\''+msg.id+'\')">✎</button><button onclick="удалитьСообщение(\''+msg.id+'\')">✕</button></div>':'';div.innerHTML='<div class="msg-avatar" onclick="открытьПрофиль(\''+msg.имя+'\')">'+аватар+'</div><div><div class="msg-bubble">'+содержимое+(msg.отредактировано?'<span class="edited">✎</span>':'')+'</div><div class="msg-time">'+msg.время+'</div>'+действия+'</div>';$('messagesContainer').appendChild(div);}
-function удалитьСообщение(id){if(!confirm('Удалить сообщение?'))return;socket.emit('удалить_сообщение',{чат:текущийЧат,id_сообщения:id,имя:текущийПользователь});}
-function редактироватьСообщение(id){const t=prompt('Редактировать:');if(t&&t.trim()){socket.emit('редактировать_сообщение',{чат:текущийЧат,id_сообщения:id,имя:текущийПользователь,содержимое:t.trim()});}}
-function скроллВниз(){setTimeout(()=>{$('messagesContainer').scrollTop=$('messagesContainer').scrollHeight;},50);}
-function создатьПост(){document.getElementById('postInput').click();}
-function обработатьПост(e){const f=e.target.files[0];if(!f)return;const описание=prompt('Описание:')||'';const r=new FileReader();r.onload=(ev)=>{socket.emit('создать_пост',{имя:текущийПользователь,содержимое:ev.target.result,тип_медиа:f.type.startsWith('video')?'видео':'изображение',описание});показатьУведомление('Пост опубликован!');};r.readAsDataURL(f);e.target.value='';}
-function отобразитьПост(p){const лайкнут=p.лайки&&p.лайки.includes(текущийПользователь);const автор=p.автор===текущийПользователь;const аватар=p.аватар?'<img src="'+p.аватар+'">':p.автор[0];return'<div class="post-card" id="post-'+p.id+'"><div class="post-header"><div class="post-avatar" onclick="открытьПрофиль(\''+p.автор+'\')">'+аватар+'</div><div><div class="post-author" onclick="открытьПрофиль(\''+p.автор+'\')">'+p.автор+'</div><div class="post-time">'+p.время+'</div></div>'+(автор?'<button class="btn" onclick="удалитьПост(\''+p.id+'\')" style="margin-left:auto;color:#ff4444">✕</button>':'')+'</div>'+(p.тип_медиа==='изображение'?'<img class="post-media" src="'+p.содержимое+'" onclick="открытьМедиа(\''+p.содержимое+'\',\'image\')">':p.тип_медиа==='видео'?'<video class="post-media" src="'+p.содержимое+'" controls></video>':'')+'<div class="post-caption">'+(p.описание||'')+'</div><div class="post-actions"><button class="post-action '+(лайкнут?'liked':'')+'" onclick="лайкнутьПост(\''+p.id+'\')">❤️ <span class="count">'+(p.лайки||[]).length+'</span></button><button class="post-action" onclick="переключитьКомментарии(\''+p.id+'\')">💬 <span class="count">'+(p.комментарии||[]).length+'</span></button></div><div class="post-comments" id="comments-'+p.id+'" style="'+(p.комментарии||[]).length?'':'display:none'+'">'+(p.комментарии||[]).map(c=>'<div class="post-comment"><div class="post-comment-avatar">'+(c.аватар?'<img src="'+c.аватар+'">':c.имя[0])+'</div><div class="post-comment-text"><b>'+c.имя+'</b> '+c.комментарий+'</div></div>').join('')+'</div><div class="comment-input"><input id="comment-'+p.id+'" placeholder="Комментарий..." onkeypress="if(event.key===\'Enter\')отправитьКомментарий(\''+p.id+'\')"><button onclick="отправитьКомментарий(\''+p.id+'\')">Отправить</button></div></div>';}
-function лайкнутьПост(id){socket.emit('лайкнуть_пост',{id_поста:id,имя:текущийПользователь});}
-function отправитьКомментарий(id){const input=document.getElementById('comment-'+id);const текст=input.value.trim();if(!текст)return;socket.emit('комментировать_пост',{id_поста:id,имя:текущийПользователь,комментарий:текст});input.value='';}
-function переключитьКомментарии(id){const el=document.getElementById('comments-'+id);if(el)el.style.display=el.style.display==='none'?'block':'none';}
-function удалитьПост(id){if(!confirm('Удалить пост?'))return;const xhr=new XMLHttpRequest();xhr.open('POST','/удалить_пост',true);xhr.setRequestHeader('Content-Type','application/json');xhr.send(JSON.stringify({pid:id,n:текущийПользователь}));setTimeout(()=>socket.emit('получить_посты'),500);}
-function отобразитьНастройки(){const аватар=текущийАватар?'<img src="'+текущийАватар+'">':текущийПользователь?текущийПользователь[0]:'?';$('settingsContent').innerHTML='<div class="profile-section"><div class="profile-avatar" onclick="document.getElementById(\'avatarInput\').click()">'+аватар+'</div><div class="profile-name">'+(текущийПользователь||'Гость')+'</div><div class="profile-bio">'+(текущееОписание||'Нажмите чтобы добавить описание')+'</div><div class="profile-status">🟢 Онлайн</div></div><div class="settings-group"><div class="setting-item" onclick="редактироватьОписание()"><span class="setting-label">✏️ Редактировать описание</span></div><div class="setting-item" onclick="поделиться()"><span class="setting-label">🔗 Поделиться</span></div><div class="setting-item" onclick="выйти()" style="border-left:3px solid #ff4444"><span class="setting-label" style="color:#ff4444">🚪 Выйти</span></div></div>';}
-function редактироватьОписание(){const описание=prompt('Введите описание:',текущееОписание||'');if(описание!==null){текущееОписание=описание;socket.emit('обновить_описание',{имя:текущийПользователь,описание});отобразитьНастройки();}}
-function обработатьАватар(e){const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=(ev)=>{текущийАватар=ev.target.result;socket.emit('обновить_аватар',{имя:текущийПользователь,аватар:ev.target.result});отобразитьНастройки();показатьУведомление('Аватар обновлен!');};r.readAsDataURL(f);e.target.value='';}
-function выйти(){if(!confirm('Выйти?'))return;socket.emit('выход',{токен:текущийТокен});localStorage.removeItem('shugramm_токен');localStorage.removeItem('shugramm_пользователь');текущийПользователь=null;location.reload();}
-function поделиться(){socket.emit('поделиться_ссылкой');}
-function открытьПрофиль(имя){if(имя===текущийПользователь)return;fetch('/api/пользователь/'+имя).then(r=>r.json()).then(d=>{if(d.ошибка){показатьУведомление(d.ошибка);return;}const аватар=d.аватар?'<img src="'+d.аватар+'">':d.имя[0];$('profileContent').innerHTML='<div class="profile-modal-avatar">'+аватар+'</div><div class="profile-modal-name">'+d.имя+'</div><div class="profile-modal-bio">'+(d.описание||'Нет описания')+'</div><div class="profile-modal-status '+(d.статус==='онлайн'?'online':'offline')+'">'+(d.статус==='онлайн'?'🟢 Онлайн':'⚫ Не в сети')+'</div><div class="profile-modal-posts"><div class="profile-modal-posts-title">📸 Посты ('+d.посты.length+')</div>'+(d.посты.length?d.посты.map(p=>'<div class="profile-modal-post"><span class="p-time">'+p.время+'</span><span class="p-caption">'+(p.описание||'Без описания')+'</span></div>').join(''):'<div style="color:var(--text-secondary);font-size:12px">Нет постов</div>')+'</div><button class="profile-modal-btn" onclick="начатьПриватныйЧат(\''+d.имя+'\')">💬 Написать</button>';$('profileModal').classList.add('open');});}
-function закрытьПрофиль(){$('profileModal').classList.remove('open');}
-function открытьМедиа(src,type){const viewer=$('mediaViewer');viewer.classList.add('open');if(type==='image'){$('mediaImg').src=src;$('mediaImg').style.display='block';$('mediaVideo').style.display='none';}else{$('mediaVideo').src=src;$('mediaVideo').style.display='block';$('mediaImg').style.display='none';$('mediaVideo').play();}}
-function закрытьМедиа(){$('mediaViewer').classList.remove('open');$('mediaVideo').pause();}
-function обновитьБейдж(){let всего=0;for(const k in непрочитанныеДанные)всего+=непрочитанныеДанные[k]||0;const бейдж=$('totalBadge');if(всего>0){бейдж.textContent=всего;бейдж.style.display='flex';}else{бейдж.style.display='none';}}
-document.addEventListener('keydown',(e)=>{if(e.key==='Escape'){if($('mediaViewer').classList.contains('open'))закрытьМедиа();else if(чатОткрыт)закрытьЧат();}});
-window._кешСообщений={};
-socket.on('история_чата',(d)=>{window._кешСообщений[d.чат]=d.сообщения;});
-socket.on('новое_сообщение',(d)=>{if(!window._кешСообщений[d.чат])window._кешСообщений[d.чат]=[];window._кешСообщений[d.чат].push(d.сообщение);});
+function searchUsers(){const q=$('searchUsers').value.toLowerCase();document.querySelectorAll('#usersList .chat-item').forEach(el=>{const name=el.querySelector('.chat-name').textContent.toLowerCase();el.style.display=name.includes(q)?'flex':'none';});}
+function openChat(chat,name){currentChat=chat;currentChatName=name;isChatOpen=true;document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));$('chatWindow').classList.add('open');$('chatWindow').style.display='flex';$('chatTitle').textContent=name;$('messagesContainer').innerHTML='';if(unreadData[chat]){unreadData[chat]=0;updateBadge();}socket.emit('join_chat',{chat,name:currentUser});$('msgInput').focus();}
+function openPrivateChat(chatId,name){currentChat=chatId;currentChatName=name;isChatOpen=true;document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));$('chatWindow').classList.add('open');$('chatWindow').style.display='flex';$('chatTitle').textContent=name;$('messagesContainer').innerHTML='';if(unreadData[chatId]){unreadData[chatId]=0;updateBadge();}socket.emit('join_chat',{chat:chatId,name:currentUser});$('msgInput').focus();}
+function startPrivateChat(name){if(name===currentUser)return;socket.emit('start_private_chat',{user1:currentUser,user2:name});}
+function openPrivateChatData(chatId,user,avatar,messages){currentChat=chatId;currentChatName=user;isChatOpen=true;document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));$('chatWindow').classList.add('open');$('chatWindow').style.display='flex';$('chatTitle').textContent=user;$('messagesContainer').innerHTML='';if(messages){messages.forEach(m=>renderMessage(m));scrollToBottom();}const exists=privateChats.some(c=>c.id===chatId);if(!exists){privateChats.push({id:chatId,name:user,avatar:avatar||user[0],messages:messages||[]});localStorage.setItem('private_chats',JSON.stringify(privateChats));}if(unreadData[chatId]){unreadData[chatId]=0;updateBadge();}$('msgInput').focus();}
+function closeChat(){$('chatWindow').classList.remove('open');$('chatWindow').style.display='none';isChatOpen=false;$('pageChats').classList.add('active');document.querySelector('.nav-item:nth-child(1)').classList.add('active');renderChats();}
+function deleteChat(){if(!confirm('Удалить чат из списка?'))return;privateChats=privateChats.filter(c=>c.id!==currentChat);localStorage.setItem('private_chats',JSON.stringify(privateChats));closeChat();}
+function sendMessage(){const text=$('msgInput').value.trim();if(!text)return;socket.emit('send_message',{name:currentUser,chat:currentChat,type:'text',content:text});$('msgInput').value='';socket.emit('typing',{chat:currentChat,name:currentUser,typing:false});}
+function handleTyping(){if(typingTimeout)clearTimeout(typingTimeout);socket.emit('typing',{chat:currentChat,name:currentUser,typing:true});typingTimeout=setTimeout(()=>{socket.emit('typing',{chat:currentChat,name:currentUser,typing:false});},1500);}
+function handleFile(e){const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=(ev)=>{socket.emit('send_message',{name:currentUser,chat:currentChat,type:f.type.startsWith('video')?'video':'image',content:ev.target.result});};r.readAsDataURL(f);e.target.value='';}
+function renderMessage(msg){const isSelf=msg.name===currentUser;const div=document.createElement('div');div.className='msg'+(isSelf?' self':'');div.dataset.msgId=msg.id;let content=msg.content;if(msg.type==='image'){content='<img src="'+msg.content+'" onclick="openMedia(\''+msg.content+'\',\'image\')">';}else if(msg.type==='video'){content='<video src="'+msg.content+'" controls></video>';}else{content=msg.content.replace(/</g,'&lt;').replace(/>/g,'&gt;');}const avatar=msg.avatar?'<img src="'+msg.avatar+'">':msg.name[0];const actions=isSelf?'<div class="msg-actions"><button onclick="editMessage(\''+msg.id+'\')">✎</button><button onclick="deleteMessage(\''+msg.id+'\')">✕</button></div>':'';div.innerHTML='<div class="msg-avatar" onclick="openProfile(\''+msg.name+'\')">'+avatar+'</div><div><div class="msg-bubble">'+content+(msg.edited?'<span class="edited">✎</span>':'')+'</div><div class="msg-time">'+msg.time+'</div>'+actions+'</div>';$('messagesContainer').appendChild(div);}
+function deleteMessage(msgId){if(!confirm('Удалить сообщение?'))return;socket.emit('delete_message',{chat:currentChat,msg_id:msgId,name:currentUser});}
+function editMessage(msgId){const t=prompt('Редактировать:');if(t&&t.trim()){socket.emit('edit_message',{chat:currentChat,msg_id:msgId,name:currentUser,content:t.trim()});}}
+function scrollToBottom(){setTimeout(()=>{$('messagesContainer').scrollTop=$('messagesContainer').scrollHeight;},50);}
+function createPost(){document.getElementById('postInput').click();}
+function handlePost(e){const f=e.target.files[0];if(!f)return;const caption=prompt('Описание:')||'';const r=new FileReader();r.onload=(ev)=>{socket.emit('create_post',{name:currentUser,content:ev.target.result,media_type:f.type.startsWith('video')?'video':'image',caption});showNotification('Пост опубликован!');};r.readAsDataURL(f);e.target.value='';}
+function renderPost(p){const isLiked=p.likes&&p.likes.includes(currentUser);const isAuthor=p.author===currentUser;const avatar=p.avatar?'<img src="'+p.avatar+'">':p.author[0];return'<div class="post-card" id="post-'+p.id+'"><div class="post-header"><div class="post-avatar" onclick="openProfile(\''+p.author+'\')">'+avatar+'</div><div><div class="post-author" onclick="openProfile(\''+p.author+'\')">'+p.author+'</div><div class="post-time">'+p.time+'</div></div>'+(isAuthor?'<button class="btn" onclick="deletePost(\''+p.id+'\')" style="margin-left:auto;color:#ff4444">✕</button>':'')+'</div>'+(p.media_type==='image'?'<img class="post-media" src="'+p.content+'" onclick="openMedia(\''+p.content+'\',\'image\')">':p.media_type==='video'?'<video class="post-media" src="'+p.content+'" controls></video>':'')+'<div class="post-caption">'+(p.caption||'')+'</div><div class="post-actions"><button class="post-action '+(isLiked?'liked':'')+'" onclick="likePost(\''+p.id+'\')">❤️ <span class="count">'+(p.likes||[]).length+'</span></button><button class="post-action" onclick="toggleComments(\''+p.id+'\')">💬 <span class="count">'+(p.comments||[]).length+'</span></button></div><div class="post-comments" id="comments-'+p.id+'" style="'+(p.comments||[]).length?'':'display:none'+'">'+(p.comments||[]).map(c=>'<div class="post-comment"><div class="post-comment-avatar">'+(c.avatar?'<img src="'+c.avatar+'">':c.name[0])+'</div><div class="post-comment-text"><b>'+c.name+'</b> '+c.comment+'</div></div>').join('')+'</div><div class="comment-input"><input id="comment-'+p.id+'" placeholder="Комментарий..." onkeypress="if(event.key===\'Enter\')sendComment(\''+p.id+'\')"><button onclick="sendComment(\''+p.id+'\')">Отправить</button></div></div>';}
+function likePost(postId){socket.emit('like_post',{post_id:postId,name:currentUser});}
+function sendComment(postId){const input=document.getElementById('comment-'+postId);const text=input.value.trim();if(!text)return;socket.emit('comment_post',{post_id:postId,name:currentUser,comment:text});input.value='';}
+function toggleComments(postId){const el=document.getElementById('comments-'+postId);if(el)el.style.display=el.style.display==='none'?'block':'none';}
+function deletePost(postId){if(!confirm('Удалить пост?'))return;const xhr=new XMLHttpRequest();xhr.open('POST','/delete_post',true);xhr.setRequestHeader('Content-Type','application/json');xhr.send(JSON.stringify({pid:postId,n:currentUser}));setTimeout(()=>socket.emit('get_posts'),500);}
+function renderSettings(){const avatar=currentAvatar?'<img src="'+currentAvatar+'">':currentUser?currentUser[0]:'?';$('settingsContent').innerHTML='<div class="profile-section"><div class="profile-avatar" onclick="document.getElementById(\'avatarInput\').click()">'+avatar+'</div><div class="profile-name">'+(currentUser||'Гость')+'</div><div class="profile-bio">'+(currentBio||'Нажмите чтобы добавить описание')+'</div><div class="profile-status">🟢 Онлайн</div></div><div class="settings-group"><div class="setting-item" onclick="editBio()"><span class="setting-label">✏️ Редактировать описание</span></div><div class="setting-item" onclick="shareApp()"><span class="setting-label">🔗 Поделиться</span></div><div class="setting-item" onclick="logout()" style="border-left:3px solid #ff4444"><span class="setting-label" style="color:#ff4444">🚪 Выйти</span></div></div>';}
+function editBio(){const bio=prompt('Введите описание:',currentBio||'');if(bio!==null){currentBio=bio;socket.emit('update_bio',{name:currentUser,bio});renderSettings();}}
+function handleAvatar(e){const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=(ev)=>{currentAvatar=ev.target.result;socket.emit('update_avatar',{name:currentUser,avatar:ev.target.result});renderSettings();showNotification('Аватар обновлен!');};r.readAsDataURL(f);e.target.value='';}
+function logout(){if(!confirm('Выйти?'))return;socket.emit('logout',{token:currentToken});localStorage.removeItem('shugramm_token');localStorage.removeItem('shugramm_user');currentUser=null;location.reload();}
+function shareApp(){socket.emit('share_link');}
+function openProfile(name){if(name===currentUser)return;fetch('/api/user/'+name).then(r=>r.json()).then(d=>{if(d.error){showNotification(d.error);return;}const avatar=d.avatar?'<img src="'+d.avatar+'">':d.name[0];$('profileContent').innerHTML='<div class="profile-modal-avatar">'+avatar+'</div><div class="profile-modal-name">'+d.name+'</div><div class="profile-modal-bio">'+(d.bio||'Нет описания')+'</div><div class="profile-modal-status '+(d.status==='online'?'online':'offline')+'">'+(d.status==='online'?'🟢 Онлайн':'⚫ Не в сети')+'</div><div class="profile-modal-posts"><div class="profile-modal-posts-title">📸 Посты ('+d.posts.length+')</div>'+(d.posts.length?d.posts.map(p=>'<div class="profile-modal-post"><span class="p-time">'+p.time+'</span><span class="p-caption">'+(p.caption||'Без описания')+'</span></div>').join(''):'<div style="color:var(--text-secondary);font-size:12px">Нет постов</div>')+'</div><button class="profile-modal-btn" onclick="startPrivateChat(\''+d.name+'\')">💬 Написать</button>';$('profileModal').classList.add('open');});}
+function closeProfile(){$('profileModal').classList.remove('open');}
+function openMedia(src,type){const viewer=$('mediaViewer');viewer.classList.add('open');if(type==='image'){$('mediaImg').src=src;$('mediaImg').style.display='block';$('mediaVideo').style.display='none';}else{$('mediaVideo').src=src;$('mediaVideo').style.display='block';$('mediaImg').style.display='none';$('mediaVideo').play();}}
+function closeMedia(){$('mediaViewer').classList.remove('open');$('mediaVideo').pause();}
+function updateBadge(){let total=0;for(const k in unreadData)total+=unreadData[k]||0;const badge=$('totalBadge');if(total>0){badge.textContent=total;badge.style.display='flex';}else{badge.style.display='none';}}
+document.addEventListener('keydown',(e)=>{if(e.key==='Escape'){if($('mediaViewer').classList.contains('open'))closeMedia();else if(isChatOpen)closeChat();}});
+window._messagesCache={};
+socket.on('chat_history',(d)=>{window._messagesCache[d.chat]=d.messages;});
+socket.on('new_message',(d)=>{if(!window._messagesCache[d.chat])window._messagesCache[d.chat]=[];window._messagesCache[d.chat].push(d.message);});
 console.log('⚡ Shugramm загружен!');
 </script>
 </body>
 </html>
 '''
 
-# ========== ЗАПУСК ==========
 if __name__ == '__main__':
-    порт = int(os.environ.get('PORT', 5000))
-    socketio.run(app, host='0.0.0.0', port=порт, allow_unsafe_werkzeug=True)
+    port = int(os.environ.get('PORT', 5000))
+    socketio.run(app, host='0.0.0.0', port=port, allow_unsafe_werkzeug=True)
