@@ -12,6 +12,7 @@ posts = []
 groups = {'general': {'id': 'general', 'name': 'Общий чат', 'members': set(), 'messages': []}}
 private_chats = {}
 pending = {}
+unread = {}
 colors = ['#FFD700', '#FFA500', '#FF8C00', '#FFB800', '#FFC800', '#E6C200']
 
 def hash_pass(password):
@@ -22,12 +23,7 @@ def generate_token():
 
 @app.route('/')
 def index():
-    token = request.cookies.get('shugramm_token')
-    if token:
-        for uname, udata in users.items():
-            if udata.get('token') == token:
-                return render_template_string(HTML.replace('AUTO_LOGIN_USER', uname).replace('AUTO_LOGIN_AVATAR', udata.get('au') or udata['a']).replace('AUTO_LOGIN_TOKEN', token))
-    return render_template_string(HTML.replace('AUTO_LOGIN_USER', '').replace('AUTO_LOGIN_AVATAR', '').replace('AUTO_LOGIN_TOKEN', ''))
+    return render_template_string(HTML)
 
 @socketio.on('rc')
 def rc(data):
@@ -68,6 +64,7 @@ def sp(data):
         'phone': phone, 'pass': hash_pass(password), 'lang': 'ru', 'bio': '',
         'token': token
     }
+    unread[name] = {}
     groups['general']['members'].add(name)
     join_room('general')
     emit('ro', {'n': name, 'a': color, 'token': token})
@@ -121,11 +118,23 @@ def sm(data):
     elif chat in private_chats:
         private_chats[chat]['messages'].append(msg)
     emit('nm', {'ch': chat, 'm': msg}, room=chat)
+    for uname, udata in users.items():
+        if uname != name:
+            if chat in groups and uname in groups[chat]['members']:
+                if chat not in unread.get(uname, {}): unread[uname] = {}
+                unread[uname][chat] = unread[uname].get(chat, 0) + 1
+            elif chat in private_chats and uname in private_chats[chat]['users']:
+                if chat not in unread.get(uname, {}): unread[uname] = {}
+                unread[uname][chat] = unread[uname].get(chat, 0) + 1
+            if udata.get('s'):
+                emit('notify', {'ch': chat, 'n': name, 'c': msg.get('c', '')[:30]}, room=udata['s'])
 
 @socketio.on('jc')
 def jc(data):
     chat = data.get('ch', 'general')
     join_room(chat)
+    if data.get('n') in unread:
+        unread[data['n']][chat] = 0
     msgs = groups[chat]['messages'][-100:] if chat in groups else private_chats.get(chat, {}).get('messages', [])[-100:]
     emit('ch', {'ms': msgs})
 
@@ -141,6 +150,7 @@ def sp2(data):
     if cid not in private_chats:
         private_chats[cid] = {'users': [u1, u2], 'messages': []}
     join_room(cid)
+    if u1 in unread: unread[u1][cid] = 0
     emit('po', {'ch': cid, 't': u2, 'a': users[u2].get('au') or users[u2]['a'], 'ms': private_chats[cid]['messages']})
 
 @socketio.on('ua')
@@ -159,8 +169,7 @@ def ul2(data):
 def cp(data):
     name = data.get('n')
     content = data.get('m', '')
-    if len(content) > 200000:
-        content = content[:200000]
+    if len(content) > 200000: content = content[:200000]
     post = {
         'id': f"p{len(posts)}_{time.time()}", 'n': name,
         'a': users[name].get('au') or users[name]['a'],
@@ -225,7 +234,10 @@ HTML = r'''
 :root{--bg:#0d0d0d;--bg2:#1a1a1a;--bg3:#2a2a2a;--y:#FFD700;--g:#888;--w:#fff;--b:#3a3a3a;--gr:#4CAF50;--r:#f44}
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#000;height:100vh;display:flex;justify-content:center;align-items:center;color:var(--w);user-select:none;overflow:hidden}
-.app{width:100%;max-width:480px;height:100vh;background:var(--bg);display:flex;flex-direction:column}
+.app{width:100%;max-width:480px;height:100vh;background:var(--bg);display:flex;flex-direction:column;position:relative}
+.notification{position:fixed;top:0;left:50%;transform:translateX(-50%);z-index:400;background:var(--bg2);color:var(--w);padding:10px 20px;border-radius:0 0 12px 12px;font-size:13px;max-width:90%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 4px 15px rgba(0,0,0,.5);display:none;border-bottom:2px solid var(--y)}
+.notification.show{display:block;animation:slideDown .3s ease}
+@keyframes slideDown{from{transform:translateX(-50%) translateY(-100%)}to{transform:translateX(-50%) translateY(0)}}
 .header{background:var(--bg2);padding:8px 16px;display:flex;align-items:center;border-bottom:1px solid var(--b);min-height:44px}
 .header-title{font-weight:600;font-size:17px;flex:1;display:flex;align-items:center;gap:8px}
 .header-title .logo{color:var(--y);font-weight:800;font-size:20px}
@@ -244,6 +256,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .list-info{flex:1;min-width:0;border-bottom:1px solid rgba(255,255,255,.05);padding-bottom:10px}
 .list-name{font-weight:500;font-size:15px}
 .list-preview{font-size:13px;color:var(--g);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.unread-badge{background:var(--y);color:#000;font-size:10px;font-weight:700;min-width:18px;height:18px;border-radius:9px;display:flex;align-items:center;justify-content:center;padding:0 5px;margin-left:8px}
 .msg-row{display:flex;gap:4px;margin-bottom:2px;padding:0 14px}
 .msg-row.mine{flex-direction:row-reverse}
 .msg-avatar{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#000;flex-shrink:0;margin-top:auto;overflow:hidden;background:var(--y)}
@@ -308,6 +321,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 </head>
 <body>
 <div class="app">
+<div class="notification" id="notification"></div>
 <div class="header"><div class="header-title"><span class="logo">⚡</span>Shugramm</div><button class="btn" onclick="share()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg></button></div>
 <div class="content active" id="chatsContent"></div>
 <div class="content" id="usersContent"></div>
@@ -341,11 +355,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
 <script>
 const s=io();let u=null,ua=null,ch='general',pd='',lang='ru',token='';
-let savedToken=localStorage.getItem('shugramm_token')||'AUTO_LOGIN_TOKEN';
-if(savedToken&&savedToken!=='AUTO_LOGIN_TOKEN'&&savedToken!==''){s.emit('auto_login',{token:savedToken})}
-function requestCode(){const p=document.getElementById('phoneInput').value.trim();if(p.length<10){alert('Enter valid number');return}s.emit('rc',{p:p})}
-function verifyCode(){const c=document.getElementById('codeInput').value.trim();if(c.length!==6){alert('Enter 6 digits');return}s.emit('vc',{d:pd,c:c})}
-function setPassword(){const p=document.getElementById('passwordInput').value.trim();const n=document.getElementById('nameInput').value.trim();if(!p||p.length<4){alert('Password min 4 chars');return}if(!n||n.length<2){alert('Name min 2 chars');return}s.emit('sp',{d:pd,p:p,n:n})}
+let savedToken=localStorage.getItem('shugramm_token')||'';
+if(savedToken){s.emit('auto_login',{token:savedToken})}
+function notify(msg){const n=document.getElementById('notification');n.textContent=msg;n.classList.add('show');setTimeout(()=>n.classList.remove('show'),3000)}
+function requestCode(){const p=document.getElementById('phoneInput').value.trim();if(p.length<10){notify('Введите номер');return}s.emit('rc',{p:p})}
+function verifyCode(){const c=document.getElementById('codeInput').value.trim();if(c.length!==6){notify('Введите 6 цифр');return}s.emit('vc',{d:pd,c:c})}
+function setPassword(){const p=document.getElementById('passwordInput').value.trim();const n=document.getElementById('nameInput').value.trim();if(!p||p.length<4){notify('Пароль минимум 4 символа');return}if(!n||n.length<2){notify('Имя минимум 2 символа');return}s.emit('sp',{d:pd,p:p,n:n})}
 function loginUser(){const p=document.getElementById('loginPassword').value.trim();if(!p)return;s.emit('li',{n:document.getElementById('loginUsername').textContent,p:p})}
 function backToPhone(){document.getElementById('step2').classList.add('hidden');document.getElementById('step1').classList.remove('hidden')}
 function backToStart(){document.getElementById('step4').classList.add('hidden');document.getElementById('step1').classList.remove('hidden')}
@@ -354,20 +369,26 @@ s.on('ue',d=>{document.getElementById('step2').classList.add('hidden');document.
 s.on('nu',d=>{pd=d.d;document.getElementById('step2').classList.add('hidden');document.getElementById('step3').classList.remove('hidden')})
 s.on('ro',d=>{u=d.n;ua=d.a;token=d.token;localStorage.setItem('shugramm_token',token);enterApp()})
 s.on('lo',d=>{u=d.n;ua=d.a;token=d.token;localStorage.setItem('shugramm_token',token);enterApp()})
-s.on('er',d=>{alert('❌ '+d.m)})
+s.on('er',d=>{notify(d.m)})
+s.on('notify',d=>{if(document.getElementById('chatsContent').classList.contains('active')){loadChats()}else{notify(d.n+': '+d.c)}})
 function enterApp(){document.getElementById('loginScreen').classList.add('hidden');document.getElementById('nav').style.display='flex';loadChats()}
-function loadChats(){document.getElementById('chatsContent').innerHTML='<div class="list-item" onclick="openChat(\'general\',\'Общий чат\')"><div class="avatar">#</div><div class="list-info"><div class="list-name">Общий чат</div></div></div>'}
+function loadChats(){
+let h='<div class="list-item" onclick="openChat(\'general\',\'Общий чат\')"><div class="avatar">#</div><div class="list-info"><div class="list-name">Общий чат</div></div></div>';
+document.getElementById('chatsContent').innerHTML=h
+}
 function switchTab(t){
 document.querySelectorAll('.content').forEach(c=>c.classList.remove('active'));
 document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
 document.getElementById('fab').classList.remove('show');
+document.getElementById('chatWindow').classList.add('hidden');
+document.getElementById('chatWindow').style.display='none';
 if(t==='chats'){document.getElementById('chatsContent').classList.add('active');document.querySelector('.nav-item:nth-child(1)').classList.add('active')}
 else if(t==='users'){document.getElementById('usersContent').classList.add('active');document.querySelector('.nav-item:nth-child(2)').classList.add('active');s.emit('gu',{n:u})}
 else if(t==='posts'){document.getElementById('postsContent').classList.add('active');document.querySelector('.nav-item:nth-child(3)').classList.add('active');document.getElementById('fab').classList.add('show');s.emit('gp')}
 else{document.getElementById('settingsContent').classList.add('active');document.querySelector('.nav-item:nth-child(4)').classList.add('active');loadSettings()}
 }
 function loadSettings(){
-let h='<div class="profile-section"><div class="profile-avatar" onclick="document.getElementById(\'avatarInput\').click()">'+(ua?'<img src="'+ua+'">':u[0])+'</div><div class="profile-name">'+u+'</div><div class="profile-bio" id="bioText">'+(usersBio||'Нажмите чтобы добавить описание')+'</div></div>';
+let h='<div class="profile-section"><div class="profile-avatar" onclick="document.getElementById(\'avatarInput\').click()">'+(ua?'<img src="'+ua+'">':u[0])+'</div><div class="profile-name">'+u+'</div><div class="profile-bio">'+(usersBio||'Нажмите чтобы добавить описание')+'</div></div>';
 h+='<div class="settings-group"><div class="setting-item" onclick="editBio()"><span class="setting-label">Описание</span></div>';
 h+='<div class="setting-item" onclick="changeLang()"><span class="setting-label">Язык</span><span class="setting-value">'+lang+'</span></div>';
 h+='<div class="setting-item" onclick="share()"><span class="setting-label">Поделиться</span></div>';
@@ -375,11 +396,11 @@ h+='<div class="setting-item" onclick="doLogout()"><span class="setting-label" s
 document.getElementById('settingsContent').innerHTML=h
 }
 let usersBio='';
-function editBio(){const b=prompt('Описание профиля:',usersBio||'');if(b!==null){usersBio=b;s.emit('ub',{n:u,b:b});loadSettings()}}
+function editBio(){const b=prompt('Описание:',usersBio||'');if(b!==null){usersBio=b;s.emit('ub',{n:u,b:b});loadSettings()}}
 function changeLang(){lang=lang==='ru'?'en':'ru';s.emit('ul2',{n:u,l:lang});loadSettings()}
-function doLogout(){localStorage.removeItem('shugramm_token');s.emit('logout',{token:token});u=null;ua=null;location.reload()}
-function openChat(id,nm){ch=id;document.querySelectorAll('.content').forEach(c=>c.classList.remove('active'));document.getElementById('chatWindow').classList.remove('hidden');document.getElementById('chatWindow').style.display='='flex';document.getElementById('chatTitle').textContent=nm;document.getElementById('messages').innerHTML='';s.emit('jc',{ch:id})}
-function closeChat(){document.getElementById('chatWindow').classList.add('hidden');document.getElementById('chatWindow').style.display='none';document.getElementById('chatsContent').classList.add('active')}
+function doLogout(){localStorage.removeItem('shugramm_token');u=null;ua=null;location.reload()}
+function openChat(id,nm){ch=id;document.querySelectorAll('.content').forEach(c=>c.classList.remove('active'));document.getElementById('chatWindow').classList.remove('hidden');document.getElementById('chatWindow').style.display='flex';document.getElementById('chatTitle').textContent=nm;document.getElementById('messages').innerHTML='';s.emit('jc',{ch:id,n:u})}
+function closeChat(){document.getElementById('chatWindow').classList.add('hidden');document.getElementById('chatWindow').style.display='none';document.getElementById('chatsContent').classList.add('active');loadChats()}
 function sendMsg(){const i=document.getElementById('msgInput');const t=i.value.trim();if(!t)return;s.emit('sm',{n:u,ch:ch,t:'text',c:t});i.value=''}
 function handleFile(e){const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>{s.emit('sm',{n:u,ch:ch,t:f.type.startsWith('video')?'vid':'img',c:ev.target.result})};r.readAsDataURL(f)}
 function handleAvatar(e){const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>{ua=ev.target.result;s.emit('ua',{n:u,a:ev.target.result});loadSettings()};r.readAsDataURL(f)}
@@ -390,7 +411,7 @@ s.on('nm',d=>{if(d.ch===ch){addMsg(d.m);scrollBottom()}})
 function addMsg(m){
 const c=document.getElementById('messages');const im=m.n===u;const d=document.createElement('div');
 d.className='msg-row '+(im?'mine':'');
-let ct=m.t==='img'?`<img src="${m.c}" onclick="viewMedia('${m.c}','img')">`:m.t==='vid'?`<video src="${m.c}" controls></video>`:m.c.replace(/</g,'&lt;').replace(/\n/g,'<br>');
+let ct=m.t==='img'?`<img src="${m.c}" onclick="viewMedia('${m.c}','img')">`:m.t==='vid'?`<video src="${m.c}" controls onclick="event.stopPropagation()"></video>`:m.c.replace(/</g,'&lt;').replace(/\n/g,'<br>');
 let av=m.a&&m.a.startsWith('data:')?`<img src="${m.a}">`:m.n[0];
 d.innerHTML=`<div class="msg-avatar">${av}</div><div style="max-width:75%"><div class="msg-bubble">${ct}</div><div class="msg-time">${m.ts}</div></div>`;
 c.appendChild(d)
@@ -419,7 +440,7 @@ return `<div class="post-card" id="${p.id}"><div class="post-header"><div class=
 function likePost(pid){s.emit('lp',{pid:pid,n:u})}
 function addComment(pid){const i=document.getElementById('ci_'+pid);const t=i.value.trim();if(!t)return;s.emit('cmp',{pid:pid,n:u,c:t});i.value=''}
 function share(){s.emit('sh')}
-s.on('sl',d=>{const l='https://'+d.l;if(navigator.clipboard){navigator.clipboard.writeText(l).then(()=>alert('Ссылка скопирована!'))}else{prompt('Ссылка:',l)}})
+s.on('sl',d=>{const l='https://'+d.l;if(navigator.clipboard){navigator.clipboard.writeText(l).then(()=>notify('Ссылка скопирована!'))}else{prompt('Ссылка:',l)}})
 function viewMedia(src,tp){
 const mv=document.getElementById('mediaViewer');mv.classList.add('show');
 if(tp==='img'){document.getElementById('mediaImg').src=src;document.getElementById('mediaImg').style.display='block';document.getElementById('mediaVid').style.display='none'}
