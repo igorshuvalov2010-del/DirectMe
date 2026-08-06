@@ -17,9 +17,17 @@ colors = ['#FFD700', '#FFA500', '#FF8C00', '#FFB800', '#FFC800', '#E6C200']
 def hash_pass(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
+def generate_token():
+    return hashlib.sha256(str(random.random()).encode()).hexdigest()[:32]
+
 @app.route('/')
 def index():
-    return render_template_string(HTML)
+    token = request.cookies.get('shugramm_token')
+    if token:
+        for uname, udata in users.items():
+            if udata.get('token') == token:
+                return render_template_string(HTML.replace('AUTO_LOGIN_USER', uname).replace('AUTO_LOGIN_AVATAR', udata.get('au') or udata['a']).replace('AUTO_LOGIN_TOKEN', token))
+    return render_template_string(HTML.replace('AUTO_LOGIN_USER', '').replace('AUTO_LOGIN_AVATAR', '').replace('AUTO_LOGIN_TOKEN', ''))
 
 @socketio.on('rc')
 def rc(data):
@@ -54,13 +62,15 @@ def sp(data):
         emit('er', {'m': 'Name too short'})
         return
     color = colors[len(users) % len(colors)]
+    token = generate_token()
     users[name] = {
         's': request.sid, 'a': color, 'au': None, 'st': 'online',
-        'phone': phone, 'pass': hash_pass(password), 'lang': 'ru', 'bio': ''
+        'phone': phone, 'pass': hash_pass(password), 'lang': 'ru', 'bio': '',
+        'token': token
     }
     groups['general']['members'].add(name)
     join_room('general')
-    emit('ro', {'n': name, 'a': color})
+    emit('ro', {'n': name, 'a': color, 'token': token})
 
 @socketio.on('li')
 def li(data):
@@ -72,10 +82,24 @@ def li(data):
     if users[name]['pass'] != hash_pass(password):
         emit('er', {'m': 'Wrong password'})
         return
+    token = generate_token()
     users[name]['s'] = request.sid
     users[name]['st'] = 'online'
+    users[name]['token'] = token
     join_room('general')
-    emit('lo', {'n': name, 'a': users[name].get('au') or users[name]['a']})
+    emit('lo', {'n': name, 'a': users[name].get('au') or users[name]['a'], 'token': token})
+
+@socketio.on('auto_login')
+def auto_login(data):
+    token = data.get('token', '')
+    for uname, udata in users.items():
+        if udata.get('token') == token:
+            users[uname]['s'] = request.sid
+            users[uname]['st'] = 'online'
+            join_room('general')
+            emit('lo', {'n': uname, 'a': udata.get('au') or udata['a'], 'token': token})
+            return
+    emit('er', {'m': 'Session expired'})
 
 @socketio.on('sm')
 def sm(data):
@@ -134,11 +158,14 @@ def ul2(data):
 @socketio.on('cp')
 def cp(data):
     name = data.get('n')
+    content = data.get('m', '')
+    if len(content) > 200000:
+        content = content[:200000]
     post = {
         'id': f"p{len(posts)}_{time.time()}", 'n': name,
         'a': users[name].get('au') or users[name]['a'],
-        'm': data.get('m', '')[:100000], 'mt': data.get('mt', 'image'),
-        'c': data.get('c', '')[:300], 'l': [], 'cm': [],
+        'm': content, 'mt': data.get('mt', 'image'),
+        'c': data.get('c', '')[:500], 'l': [], 'cm': [],
         'ts': datetime.now().strftime("%d.%m.%Y %H:%M")
     }
     posts.insert(0, post)
@@ -166,7 +193,7 @@ def cmp(data):
             p['cm'].append({
                 'n': data.get('n'),
                 'a': users[data.get('n')].get('au') or users[data.get('n')]['a'],
-                'c': data.get('c', '')[:200],
+                'c': data.get('c', '')[:300],
                 'ts': datetime.now().strftime("%H:%M")
             })
             emit('pu', {'p': p}, broadcast=True)
@@ -176,7 +203,17 @@ def cmp(data):
 def sh():
     emit('sl', {'l': request.host})
 
-HTML = r'''<!DOCTYPE html>
+@socketio.on('logout')
+def logout(data):
+    token = data.get('token', '')
+    for uname, udata in users.items():
+        if udata.get('token') == token:
+            udata['token'] = ''
+            udata['st'] = 'offline'
+            break
+
+HTML = r'''
+<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
@@ -207,12 +244,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .list-info{flex:1;min-width:0;border-bottom:1px solid rgba(255,255,255,.05);padding-bottom:10px}
 .list-name{font-weight:500;font-size:15px}
 .list-preview{font-size:13px;color:var(--g);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.list-meta{text-align:right;font-size:11px;color:var(--g);flex-shrink:0}
 .msg-row{display:flex;gap:4px;margin-bottom:2px;padding:0 14px}
 .msg-row.mine{flex-direction:row-reverse}
 .msg-avatar{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#000;flex-shrink:0;margin-top:auto;overflow:hidden;background:var(--y)}
 .msg-avatar img{width:100%;height:100%;object-fit:cover}
-.msg-bubble{max-width:75%;padding:7px 10px;border-radius:14px;font-size:14px;line-height:1.4;word-wrap:break-word;background:var(--bg3)}
+.msg-bubble{max-width:75%;padding:7px 10px;border-radius:14px;font-size:14px;line-height:1.4;word-wrap:break-word;white-space:pre-wrap;background:var(--bg3)}
 .msg-row.mine .msg-bubble{background:var(--y);color:#000}
 .msg-bubble img{max-width:220px;max-height:280px;border-radius:8px;cursor:pointer;display:block;object-fit:cover}
 .msg-bubble video{max-width:220px;max-height:280px;border-radius:8px;display:block}
@@ -222,7 +258,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .input-bar input{flex:1;padding:9px 14px;background:var(--bg3);border:1px solid var(--b);border-radius:18px;color:var(--w);font-size:14px;outline:none}
 .input-bar input:focus{border-color:var(--y)}
 .send-btn{width:34px;height:34px;border-radius:50%;background:var(--y);border:none;color:#000;font-size:16px;cursor:pointer;flex-shrink:0;display:flex;align-items:center;justify-content:center}
-.send-btn:active{opacity:.8}
 .post-card{background:var(--bg2);margin-bottom:12px}
 .post-header{display:flex;align-items:center;padding:10px 14px;gap:8px}
 .post-avatar{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:600;font-size:14px;color:#000;overflow:hidden;background:var(--y)}
@@ -232,7 +267,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .post-media{width:100%;max-height:400px;object-fit:cover;cursor:pointer;display:block}
 .post-actions{display:flex;padding:8px 14px;gap:20px}
 .post-action{background:none;border:none;color:var(--w);cursor:pointer;display:flex;align-items:center;gap:5px;font-size:13px;padding:0}
-.post-action svg{width:20px;height:20px}
 .post-caption{padding:0 14px 8px;font-size:13px;line-height:1.4}
 .post-comments{padding:0 14px 8px}
 .comment-row{display:flex;gap:6px;margin-bottom:3px;font-size:12px}
@@ -243,11 +277,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .comment-input input{flex:1;background:none;border:none;color:var(--w);font-size:13px;outline:none}
 .comment-input button{background:none;border:none;color:var(--y);font-weight:600;cursor:pointer;font-size:13px}
 .profile-section{text-align:center;padding:24px;background:var(--bg2);margin:8px;border-radius:12px}
-.profile-avatar{width:80px;height:80px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:32px;font-weight:600;color:#000;margin:0 auto 10px;cursor:pointer;overflow:hidden;background:var(--y);position:relative}
+.profile-avatar{width:80px;height:80px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:32px;font-weight:600;color:#000;margin:0 auto 10px;cursor:pointer;overflow:hidden;background:var(--y)}
 .profile-avatar img{width:100%;height:100%;object-fit:cover}
 .profile-name{font-size:18px;font-weight:600}
 .profile-bio{color:var(--g);font-size:13px;margin-top:4px}
-.profile-phone{color:var(--g);font-size:12px;margin-top:2px}
 .settings-group{padding:8px}
 .setting-item{display:flex;justify-content:space-between;align-items:center;padding:14px;background:var(--bg2);margin-bottom:6px;border-radius:10px;cursor:pointer}
 .setting-item:active{background:var(--bg3)}
@@ -261,7 +294,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .form-input{width:100%;padding:12px 14px;background:var(--bg2);border:1px solid var(--b);border-radius:10px;color:var(--w);font-size:14px;margin-bottom:8px;outline:none;text-align:center}
 .form-input:focus{border-color:var(--y)}
 .form-btn{width:100%;padding:12px;background:var(--y);color:#000;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;margin-top:4px}
-.form-btn:active{opacity:.8}
 .form-link{background:none;border:none;color:var(--y);font-size:13px;cursor:pointer;margin-top:10px}
 .code-box{background:var(--bg3);padding:12px;border-radius:8px;font-size:26px;letter-spacing:8px;font-weight:600;color:var(--y);margin:10px 0}
 .hidden{display:none!important}
@@ -272,35 +304,28 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .media-close{position:absolute;top:14px;right:14px;width:34px;height:34px;border-radius:50%;background:rgba(255,255,255,.15);border:none;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:301}
 .fab{position:fixed;bottom:76px;right:14px;width:48px;height:48px;border-radius:14px;background:var(--y);color:#000;border:none;font-size:22px;cursor:pointer;z-index:10;display:none;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(255,215,0,.3)}
 .fab.show{display:flex}
-.fab:active{transform:scale(.92)}
 </style>
 </head>
 <body>
 <div class="app">
 <div class="header"><div class="header-title"><span class="logo">⚡</span>Shugramm</div><button class="btn" onclick="share()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg></button></div>
-
 <div class="content active" id="chatsContent"></div>
 <div class="content" id="usersContent"></div>
 <div class="content" id="postsContent"></div>
 <div class="content" id="settingsContent"></div>
-
 <div id="chatWindow" class="hidden" style="flex:1;display:none;flex-direction:column">
 <div class="header"><button class="btn" onclick="closeChat()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><polyline points="15 18 9 12 15 6"/></svg></button><span style="font-weight:500;flex:1" id="chatTitle"></span></div>
 <div id="messages" style="flex:1;overflow-y:auto;padding:6px 0"></div>
 <div class="input-bar"><button class="btn" onclick="document.getElementById('fileInput').click()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg></button><input type="text" id="msgInput" placeholder="Сообщение" onkeypress="if(event.key==='Enter')sendMsg()"><button class="send-btn" onclick="sendMsg()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button></div>
 </div>
-
 <button class="fab" id="fab" onclick="createPost()">+</button>
-
 <div class="nav" id="nav" style="display:none">
 <div class="nav-item active" onclick="switchTab('chats')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>Чаты</div>
 <div class="nav-item" onclick="switchTab('users')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2"/><circle cx="9" cy="7" r="4"/></svg>Контакты</div>
 <div class="nav-item" onclick="switchTab('posts')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>Посты</div>
 <div class="nav-item" onclick="switchTab('settings')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>Ещё</div>
 </div>
-
 <div class="media-viewer" id="mediaViewer"><button class="media-close" onclick="closeMedia()">✕</button><img id="mediaImg" style="display:none"><video id="mediaVid" controls style="display:none"></video></div>
-
 <div class="login-screen" id="loginScreen">
 <div class="login-card">
 <div id="step1"><div class="login-logo">⚡</div><h1>Shugramm</h1><p>Введите номер телефона</p><input type="tel" class="form-input" id="phoneInput" placeholder="+7 999 123-45-67"><button class="form-btn" onclick="requestCode()">Получить код</button></div>
@@ -310,14 +335,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 </div>
 </div>
 </div>
-
 <input type="file" id="fileInput" accept="image/*,video/*" style="display:none" onchange="handleFile(event)">
 <input type="file" id="avatarInput" accept="image/*" style="display:none" onchange="handleAvatar(event)">
 <input type="file" id="postInput" accept="image/*,video/*" style="display:none" onchange="handlePost(event)">
-
 <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
 <script>
-const s=io();let u=null,ua=null,ch='general',pd='',lang='ru';
+const s=io();let u=null,ua=null,ch='general',pd='',lang='ru',token='';
+let savedToken=localStorage.getItem('shugramm_token')||'AUTO_LOGIN_TOKEN';
+if(savedToken&&savedToken!=='AUTO_LOGIN_TOKEN'&&savedToken!==''){s.emit('auto_login',{token:savedToken})}
 function requestCode(){const p=document.getElementById('phoneInput').value.trim();if(p.length<10){alert('Enter valid number');return}s.emit('rc',{p:p})}
 function verifyCode(){const c=document.getElementById('codeInput').value.trim();if(c.length!==6){alert('Enter 6 digits');return}s.emit('vc',{d:pd,c:c})}
 function setPassword(){const p=document.getElementById('passwordInput').value.trim();const n=document.getElementById('nameInput').value.trim();if(!p||p.length<4){alert('Password min 4 chars');return}if(!n||n.length<2){alert('Name min 2 chars');return}s.emit('sp',{d:pd,p:p,n:n})}
@@ -327,8 +352,8 @@ function backToStart(){document.getElementById('step4').classList.add('hidden');
 s.on('cs',d=>{pd=d.d;document.getElementById('step1').classList.add('hidden');document.getElementById('step2').classList.remove('hidden');document.getElementById('phoneDisplay').textContent='+'+d.d;document.getElementById('codeDisplay').textContent=d.c})
 s.on('ue',d=>{document.getElementById('step2').classList.add('hidden');document.getElementById('step4').classList.remove('hidden');document.getElementById('loginUsername').textContent=d.n})
 s.on('nu',d=>{pd=d.d;document.getElementById('step2').classList.add('hidden');document.getElementById('step3').classList.remove('hidden')})
-s.on('ro',d=>{u=d.n;ua=d.a;enterApp()})
-s.on('lo',d=>{u=d.n;ua=d.a;enterApp()})
+s.on('ro',d=>{u=d.n;ua=d.a;token=d.token;localStorage.setItem('shugramm_token',token);enterApp()})
+s.on('lo',d=>{u=d.n;ua=d.a;token=d.token;localStorage.setItem('shugramm_token',token);enterApp()})
 s.on('er',d=>{alert('❌ '+d.m)})
 function enterApp(){document.getElementById('loginScreen').classList.add('hidden');document.getElementById('nav').style.display='flex';loadChats()}
 function loadChats(){document.getElementById('chatsContent').innerHTML='<div class="list-item" onclick="openChat(\'general\',\'Общий чат\')"><div class="avatar">#</div><div class="list-info"><div class="list-name">Общий чат</div></div></div>'}
@@ -343,17 +368,17 @@ else{document.getElementById('settingsContent').classList.add('active');document
 }
 function loadSettings(){
 let h='<div class="profile-section"><div class="profile-avatar" onclick="document.getElementById(\'avatarInput\').click()">'+(ua?'<img src="'+ua+'">':u[0])+'</div><div class="profile-name">'+u+'</div><div class="profile-bio" id="bioText">'+(usersBio||'Нажмите чтобы добавить описание')+'</div></div>';
-h+='<div class="settings-group"><div class="setting-item" onclick="editBio()"><span class="setting-label">Описание</span><span class="setting-value">Изменить</span></div>';
+h+='<div class="settings-group"><div class="setting-item" onclick="editBio()"><span class="setting-label">Описание</span></div>';
 h+='<div class="setting-item" onclick="changeLang()"><span class="setting-label">Язык</span><span class="setting-value">'+lang+'</span></div>';
 h+='<div class="setting-item" onclick="share()"><span class="setting-label">Поделиться</span></div>';
-h+='<div class="setting-item" onclick="logout()"><span class="setting-label" style="color:var(--r)">Выйти</span></div></div>';
+h+='<div class="setting-item" onclick="doLogout()"><span class="setting-label" style="color:var(--r)">Выйти</span></div></div>';
 document.getElementById('settingsContent').innerHTML=h
 }
 let usersBio='';
 function editBio(){const b=prompt('Описание профиля:',usersBio||'');if(b!==null){usersBio=b;s.emit('ub',{n:u,b:b});loadSettings()}}
 function changeLang(){lang=lang==='ru'?'en':'ru';s.emit('ul2',{n:u,l:lang});loadSettings()}
-function logout(){u=null;ua=null;location.reload()}
-function openChat(id,nm){ch=id;document.querySelectorAll('.content').forEach(c=>c.classList.remove('active'));document.getElementById('chatWindow').classList.remove('hidden');document.getElementById('chatWindow').style.display='flex';document.getElementById('chatTitle').textContent=nm;document.getElementById('messages').innerHTML='';s.emit('jc',{ch:id})}
+function doLogout(){localStorage.removeItem('shugramm_token');s.emit('logout',{token:token});u=null;ua=null;location.reload()}
+function openChat(id,nm){ch=id;document.querySelectorAll('.content').forEach(c=>c.classList.remove('active'));document.getElementById('chatWindow').classList.remove('hidden');document.getElementById('chatWindow').style.display='='flex';document.getElementById('chatTitle').textContent=nm;document.getElementById('messages').innerHTML='';s.emit('jc',{ch:id})}
 function closeChat(){document.getElementById('chatWindow').classList.add('hidden');document.getElementById('chatWindow').style.display='none';document.getElementById('chatsContent').classList.add('active')}
 function sendMsg(){const i=document.getElementById('msgInput');const t=i.value.trim();if(!t)return;s.emit('sm',{n:u,ch:ch,t:'text',c:t});i.value=''}
 function handleFile(e){const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>{s.emit('sm',{n:u,ch:ch,t:f.type.startsWith('video')?'vid':'img',c:ev.target.result})};r.readAsDataURL(f)}
@@ -365,8 +390,9 @@ s.on('nm',d=>{if(d.ch===ch){addMsg(d.m);scrollBottom()}})
 function addMsg(m){
 const c=document.getElementById('messages');const im=m.n===u;const d=document.createElement('div');
 d.className='msg-row '+(im?'mine':'');
-let ct=m.t==='img'?`<img src="${m.c}" onclick="viewMedia('${m.c}','img')">`:m.t==='vid'?`<video src="${mc}" controls></video>`:m.c.replace(/</g,'&lt;');
-d.innerHTML=`<div class="msg-avatar">${m.a&&m.a.startsWith('data:')?`<img src="${m.a}">`:m.n[0]}</div><div style="max-width:75%"><div class="msg-bubble">${ct}</div><div class="msg-time">${m.ts}</div></div>`;
+let ct=m.t==='img'?`<img src="${m.c}" onclick="viewMedia('${m.c}','img')">`:m.t==='vid'?`<video src="${m.c}" controls></video>`:m.c.replace(/</g,'&lt;').replace(/\n/g,'<br>');
+let av=m.a&&m.a.startsWith('data:')?`<img src="${m.a}">`:m.n[0];
+d.innerHTML=`<div class="msg-avatar">${av}</div><div style="max-width:75%"><div class="msg-bubble">${ct}</div><div class="msg-time">${m.ts}</div></div>`;
 c.appendChild(d)
 }
 function scrollBottom(){const c=document.getElementById('messages');setTimeout(()=>{c.scrollTop=c.scrollHeight},50)}
