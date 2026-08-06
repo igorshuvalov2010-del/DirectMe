@@ -461,7 +461,7 @@ def share_link():
     emit('share_link', {'url': request.host})
 
 # ========== HTML ==========
-HTML = r'''
+HTML = '''
 <!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -477,22 +477,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 ::-webkit-scrollbar-thumb{background:var(--gold);border-radius:4px}
 #app{width:100%;max-width:480px;height:100vh;background:var(--bg);display:flex;flex-direction:column;position:relative;overflow:hidden}
 .header{background:var(--bg2);padding:8px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);flex-shrink:0;min-height:48px;z-index:10}
-.header-title{font-size:17px;font-weight:600;color:var(--gold);display:flex;align-items:center;gap:8px}
-.header-title svg{width:22px;height:22px;stroke:var(--gold)}
+.header-title{font-size:17px;font-weight:600;color:var(--gold)}
 .btn{background:none;border:none;color:var(--text-secondary);padding:6px;border-radius:50%;cursor:pointer;width:34px;height:34px;display:flex;align-items:center;justify-content:center;transition:all .2s}
 .btn:active{background:var(--bg3);transform:scale(.9)}
-.btn svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .nav{background:var(--bg2);display:flex;border-top:1px solid var(--border);flex-shrink:0;padding-bottom:env(safe-area-inset-bottom)}
 .nav-item{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px 0 8px;cursor:pointer;color:var(--text-secondary);font-size:9px;transition:color .2s;position:relative;background:none;border:none}
 .nav-item.active{color:var(--gold)}
-.nav-item svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.nav-item .icon{font-size:20px}
 .nav-item .badge{position:absolute;top:2px;right:50%;transform:translateX(200%);background:#ff4444;color:#fff;font-size:9px;font-weight:700;min-width:16px;height:16px;border-radius:8px;display:flex;align-items:center;justify-content:center;padding:0 4px}
 .page{flex:1;overflow-y:auto;display:none;-webkit-overflow-scrolling:touch;padding-bottom:4px}
 .page.active{display:block}
-.fab{position:fixed;bottom:80px;right:16px;width:48px;height:48px;border-radius:50%;background:var(--gold);color:#000;border:none;cursor:pointer;z-index:20;display:none;align-items:center;justify-content:center;box-shadow:0 4px 16px rgba(255,215,0,.3);transition:transform .2s}
+.fab{position:fixed;bottom:80px;right:16px;width:48px;height:48px;border-radius:50%;background:var(--gold);color:#000;border:none;font-size:24px;cursor:pointer;z-index:20;display:none;align-items:center;justify-content:center;box-shadow:0 4px 16px rgba(255,215,0,.3);transition:transform .2s}
 .fab.show{display:flex}
 .fab:active{transform:scale(.9)}
-.fab svg{width:28px;height:28px;stroke:#000;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round}
 .chat-item{display:flex;align-items:center;padding:10px 16px;gap:12px;cursor:pointer;transition:background .15s;border-bottom:1px solid rgba(255,255,255,.03)}
 .chat-item:active{background:var(--bg3)}
 .chat-avatar{width:48px;height:48px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:600;color:#000;background:var(--gold);overflow:hidden;position:relative}
@@ -528,10 +525,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .input-bar input{flex:1;padding:8px 14px;background:var(--bg3);border:1px solid var(--border);border-radius:18px;color:var(--text);font-size:14px;outline:none;transition:border .3s}
 .input-bar input:focus{border-color:var(--gold)}
 .input-bar input::placeholder{color:var(--text-secondary)}
-.input-bar .btn svg{width:18px;height:18px}
 .send-btn{background:var(--gold);color:#000;border:none;width:34px;height:34px;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:transform .2s;flex-shrink:0}
 .send-btn:active{transform:scale(.9)}
-.send-btn svg{width:16px;height:16px;stroke:#000;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .post-card{background:var(--bg2);margin:8px 12px;border-radius:12px;overflow:hidden;border:1px solid var(--border)}
 .post-header{display:flex;align-items:center;padding:10px 14px;gap:10px}
 .post-avatar{width:36px;height:36px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600;color:#000;background:var(--gold);overflow:hidden;cursor:pointer}
@@ -545,8 +540,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .post-action{background:none;border:none;color:var(--text-secondary);cursor:pointer;display:flex;align-items:center;gap:4px;font-size:13px;padding:2px 6px;border-radius:6px;transition:all .2s}
 .post-action:active{transform:scale(.9)}
 .post-action.liked{color:#ff4444}
-.post-action svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-.post-action.liked svg{fill:#ff4444}
 .post-action .count{font-size:12px}
 .post-comments{padding:0 14px 8px}
 .post-comment{display:flex;gap:6px;margin-bottom:4px;font-size:12px}
@@ -568,8 +561,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .settings-group{padding:0 12px 12px}
 .setting-item{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;background:var(--bg2);margin-bottom:6px;border-radius:10px;cursor:pointer;transition:background .15s}
 .setting-item:active{background:var(--bg3)}
-.setting-label{font-size:14px;display:flex;align-items:center;gap:8px}
-.setting-label svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.setting-label{font-size:14px}
 .setting-value{color:var(--text-secondary);font-size:13px}
 .profile-modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.85);z-index:100;display:none;align-items:center;justify-content:center;padding:20px}
 .profile-modal.open{display:flex}
@@ -588,9 +580,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .profile-modal-post:hover{background:var(--bg4)}
 .profile-modal-post .p-time{color:var(--text-secondary);font-size:10px;float:right}
 .profile-modal-post .p-caption{color:var(--text);display:block;margin-top:2px}
-.profile-modal-btn{width:100%;padding:10px;background:var(--gold);color:#000;border:none;border-radius:10px;font-weight:600;cursor:pointer;margin-top:12px;transition:opacity .2s;display:flex;align-items:center;justify-content:center;gap:8px}
+.profile-modal-btn{width:100%;padding:10px;background:var(--gold);color:#000;border:none;border-radius:10px;font-weight:600;cursor:pointer;margin-top:12px;transition:opacity .2s}
 .profile-modal-btn:active{opacity:.8}
-.profile-modal-btn svg{width:18px;height:18px;stroke:#000;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .login-screen{position:fixed;top:0;left:0;right:0;bottom:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:200}
 .login-card{text-align:center;padding:32px 24px;width:90%;max-width:340px}
 .login-logo{font-size:48px;margin-bottom:12px}
@@ -608,7 +599,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .media-viewer img{max-width:100%;max-height:80vh;object-fit:contain}
 .media-viewer video{max-width:100%;max-height:80vh}
 .media-close{position:absolute;top:16px;right:16px;width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.1);border:none;color:#fff;font-size:20px;cursor:pointer}
-.media-close svg{width:24px;height:24px;stroke:#fff;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .notification{position:fixed;top:0;left:50%;transform:translateX(-50%);background:var(--bg2);color:var(--text);padding:10px 20px;border-radius:0 0 12px 12px;font-size:13px;max-width:90%;text-align:center;z-index:50;display:none;border-bottom:3px solid var(--gold);box-shadow:0 4px 20px rgba(0,0,0,.6)}
 .notification.show{display:block;animation:slideDown .3s ease}
 @keyframes slideDown{from{transform:translateX(-50%) translateY(-100%)}to{transform:translateX(-50%) translateY(0)}}
@@ -621,65 +611,37 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div class="notification" id="notification"></div>
 <div id="app">
 <div class="header">
-<div class="header-title">
-<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-Shugramm
-</div>
-<button class="btn" onclick="shareApp()">
-<svg viewBox="0 0 24 24"><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
-</button>
+<div class="header-title">⚡ Shugramm</div>
+<button class="btn" onclick="shareApp()">📤</button>
 </div>
 <div class="page active" id="pageChats"><div id="chatList"></div></div>
-<div class="page" id="pageUsers"><div style="padding:8px 12px;position:sticky;top:0;background:var(--bg);z-index:5"><input class="form-input" id="searchUsers" placeholder="Поиск..." oninput="searchUsers()" style="text-align:left"></div><div id="usersList"></div></div>
+<div class="page" id="pageUsers"><div style="padding:8px 12px;position:sticky;top:0;background:var(--bg);z-index:5"><input class="form-input" id="searchUsers" placeholder="🔍 Поиск..." oninput="searchUsers()" style="text-align:left"></div><div id="usersList"></div></div>
 <div class="page" id="pagePosts"><div id="postsList"></div></div>
 <div class="page" id="pageSettings"><div id="settingsContent"></div></div>
 <div id="chatWindow">
 <div class="header" style="border-bottom:1px solid var(--border);flex-shrink:0">
-<button class="btn" onclick="closeChat()">
-<svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
-</button>
+<button class="btn" onclick="closeChat()">←</button>
 <span style="font-weight:500;flex:1;font-size:15px" id="chatTitle">Чат</span>
-<button class="btn" onclick="deleteChat()">
-<svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
-</button>
+<button class="btn" onclick="deleteChat()">🗑</button>
 </div>
 <div class="messages-container" id="messagesContainer"></div>
 <div class="typing-indicator" id="typingIndicator"></div>
 <div class="input-bar">
-<button class="btn" onclick="document.getElementById('fileInput').click()">
-<svg viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
-</button>
+<button class="btn" onclick="document.getElementById('fileInput').click()">📎</button>
 <input type="text" id="msgInput" placeholder="Сообщение..." onkeypress="if(event.key==='Enter')sendMessage()" oninput="handleTyping()">
-<button class="send-btn" onclick="sendMessage()">
-<svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-</button>
+<button class="send-btn" onclick="sendMessage()">➤</button>
 </div>
 </div>
 <div class="nav" id="nav" style="display:none">
-<div class="nav-item active" onclick="switchPage('chats')">
-<svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
-<span class="label">Чаты</span>
-<span class="badge" id="totalBadge" style="display:none">0</span>
+<div class="nav-item active" onclick="switchPage('chats')"><span class="icon">💬</span><span class="label">Чаты</span><span class="badge" id="totalBadge" style="display:none">0</span></div>
+<div class="nav-item" onclick="switchPage('users')"><span class="icon">👤</span><span class="label">Люди</span></div>
+<div class="nav-item" onclick="switchPage('posts')"><span class="icon">📸</span><span class="label">Посты</span></div>
+<div class="nav-item" onclick="switchPage('settings')"><span class="icon">⚙️</span><span class="label">Настройки</span></div>
 </div>
-<div class="nav-item" onclick="switchPage('users')">
-<svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2"/><circle cx="9" cy="7" r="4"/></svg>
-<span class="label">Люди</span>
-</div>
-<div class="nav-item" onclick="switchPage('posts')">
-<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-<span class="label">Посты</span>
-</div>
-<div class="nav-item" onclick="switchPage('settings')">
-<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
-<span class="label">Настройки</span>
-</div>
-</div>
-<button class="fab" id="fab" onclick="createPost()">
-<svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-</button>
+<button class="fab" id="fab" onclick="createPost()">+</button>
 </div>
 <div class="profile-modal" id="profileModal"><div class="profile-modal-content"><button class="profile-modal-close" onclick="closeProfile()">✕</button><div id="profileContent"></div></div></div>
-<div class="media-viewer" id="mediaViewer"><button class="media-close" onclick="closeMedia()"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button><img id="mediaImg" style="display:none"><video id="mediaVideo" controls style="display:none"></video></div>
+<div class="media-viewer" id="mediaViewer"><button class="media-close" onclick="closeMedia()">✕</button><img id="mediaImg" style="display:none"><video id="mediaVideo" controls style="display:none"></video></div>
 <input type="file" id="fileInput" accept="image/*,video/*" style="display:none" onchange="handleFile(event)">
 <input type="file" id="avatarInput" accept="image/*" style="display:none" onchange="handleAvatar(event)">
 <input type="file" id="postInput" accept="image/*,video/*" style="display:none" onchange="handlePost(event)">
@@ -755,9 +717,9 @@ if(!messages||messages.length===0)return'Начните общение';
 const last=messages[messages.length-1];let text='';
 if(last.name===currentUser)text='Вы: ';
 if(last.type==='text')text+=last.content;
-else if(last.type==='image')text+='Фото';
-else if(last.type==='video')text+='Видео';
-else text+='Медиа';
+else if(last.type==='image')text+='📎 Фото';
+else if(last.type==='video')text+='📎 Видео';
+else text+='📎 Медиа';
 return text;
 }
 function renderUsers(){socket.emit('get_users',{name:currentUser});}
@@ -781,17 +743,17 @@ function editMessage(msgId){const t=prompt('Редактировать:');if(t&&
 function scrollToBottom(){setTimeout(()=>{$('messagesContainer').scrollTop=$('messagesContainer').scrollHeight;},50);}
 function createPost(){document.getElementById('postInput').click();}
 function handlePost(e){const f=e.target.files[0];if(!f)return;const caption=prompt('Описание:')||'';const r=new FileReader();r.onload=(ev)=>{socket.emit('create_post',{name:currentUser,content:ev.target.result,media_type:f.type.startsWith('video')?'video':'image',caption});showNotification('Пост опубликован!');};r.readAsDataURL(f);e.target.value='';}
-function renderPost(p){const isLiked=p.likes&&p.likes.includes(currentUser);const isAuthor=p.author===currentUser;const avatar=p.avatar?'<img src="'+p.avatar+'">':p.author[0];return'<div class="post-card" id="post-'+p.id+'"><div class="post-header"><div class="post-avatar" onclick="openProfile(\''+p.author+'\')">'+avatar+'</div><div><div class="post-author" onclick="openProfile(\''+p.author+'\')">'+p.author+'</div><div class="post-time">'+p.time+'</div></div>'+(isAuthor?'<button class="btn" onclick="deletePost(\''+p.id+'\')" style="margin-left:auto;color:#ff4444"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg></button>':'')+'</div>'+(p.media_type==='image'?'<img class="post-media" src="'+p.content+'" onclick="openMedia(\''+p.content+'\',\'image\')">':p.media_type==='video'?'<video class="post-media" src="'+p.content+'" controls></video>':'')+'<div class="post-caption">'+(p.caption||'')+'</div><div class="post-actions"><button class="post-action '+(isLiked?'liked':'')+'" onclick="likePost(\''+p.id+'\')"><svg viewBox="0 0 24 24"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg> <span class="count">'+(p.likes||[]).length+'</span></button><button class="post-action" onclick="toggleComments(\''+p.id+'\')"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg> <span class="count">'+(p.comments||[]).length+'</span></button></div><div class="post-comments" id="comments-'+p.id+'" style="'+(p.comments||[]).length?'':'display:none'+'">'+(p.comments||[]).map(c=>'<div class="post-comment"><div class="post-comment-avatar">'+(c.avatar?'<img src="'+c.avatar+'">':c.name[0])+'</div><div class="post-comment-text"><b>'+c.name+'</b> '+c.comment+'</div></div>').join('')+'</div><div class="comment-input"><input id="comment-'+p.id+'" placeholder="Комментарий..." onkeypress="if(event.key===\'Enter\')sendComment(\''+p.id+'\')"><button onclick="sendComment(\''+p.id+'\')">Отправить</button></div></div>';}
+function renderPost(p){const isLiked=p.likes&&p.likes.includes(currentUser);const isAuthor=p.author===currentUser;const avatar=p.avatar?'<img src="'+p.avatar+'">':p.author[0];return'<div class="post-card" id="post-'+p.id+'"><div class="post-header"><div class="post-avatar" onclick="openProfile(\''+p.author+'\')">'+avatar+'</div><div><div class="post-author" onclick="openProfile(\''+p.author+'\')">'+p.author+'</div><div class="post-time">'+p.time+'</div></div>'+(isAuthor?'<button class="btn" onclick="deletePost(\''+p.id+'\')" style="margin-left:auto;color:#ff4444">✕</button>':'')+'</div>'+(p.media_type==='image'?'<img class="post-media" src="'+p.content+'" onclick="openMedia(\''+p.content+'\',\'image\')">':p.media_type==='video'?'<video class="post-media" src="'+p.content+'" controls></video>':'')+'<div class="post-caption">'+(p.caption||'')+'</div><div class="post-actions"><button class="post-action '+(isLiked?'liked':'')+'" onclick="likePost(\''+p.id+'\')">❤️ <span class="count">'+(p.likes||[]).length+'</span></button><button class="post-action" onclick="toggleComments(\''+p.id+'\')">💬 <span class="count">'+(p.comments||[]).length+'</span></button></div><div class="post-comments" id="comments-'+p.id+'" style="'+(p.comments||[]).length?'':'display:none'+'">'+(p.comments||[]).map(c=>'<div class="post-comment"><div class="post-comment-avatar">'+(c.avatar?'<img src="'+c.avatar+'">':c.name[0])+'</div><div class="post-comment-text"><b>'+c.name+'</b> '+c.comment+'</div></div>').join('')+'</div><div class="comment-input"><input id="comment-'+p.id+'" placeholder="Комментарий..." onkeypress="if(event.key===\'Enter\')sendComment(\''+p.id+'\')"><button onclick="sendComment(\''+p.id+'\')">Отправить</button></div></div>';}
 function likePost(postId){socket.emit('like_post',{post_id:postId,name:currentUser});}
 function sendComment(postId){const input=document.getElementById('comment-'+postId);const text=input.value.trim();if(!text)return;socket.emit('comment_post',{post_id:postId,name:currentUser,comment:text});input.value='';}
 function toggleComments(postId){const el=document.getElementById('comments-'+postId);if(el)el.style.display=el.style.display==='none'?'block':'none';}
 function deletePost(postId){if(!confirm('Удалить пост?'))return;const xhr=new XMLHttpRequest();xhr.open('POST','/delete_post',true);xhr.setRequestHeader('Content-Type','application/json');xhr.send(JSON.stringify({pid:postId,n:currentUser}));setTimeout(()=>socket.emit('get_posts'),500);}
-function renderSettings(){const avatar=currentAvatar?'<img src="'+currentAvatar+'">':currentUser?currentUser[0]:'?';$('settingsContent').innerHTML='<div class="profile-section"><div class="profile-avatar" onclick="document.getElementById(\'avatarInput\').click()">'+avatar+'</div><div class="profile-name">'+(currentUser||'Гость')+'</div><div class="profile-bio">'+(currentBio||'Нажмите чтобы добавить описание')+'</div><div class="profile-status">Онлайн</div></div><div class="settings-group"><div class="setting-item" onclick="editBio()"><span class="setting-label"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg> Редактировать описание</span></div><div class="setting-item" onclick="shareApp()"><span class="setting-label"><svg viewBox="0 0 24 24"><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> Поделиться</span></div><div class="setting-item" onclick="logout()" style="border-left:3px solid #ff4444"><span class="setting-label" style="color:#ff4444"><svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg> Выйти</span></div></div>';}
+function renderSettings(){const avatar=currentAvatar?'<img src="'+currentAvatar+'">':currentUser?currentUser[0]:'?';$('settingsContent').innerHTML='<div class="profile-section"><div class="profile-avatar" onclick="document.getElementById(\'avatarInput\').click()">'+avatar+'</div><div class="profile-name">'+(currentUser||'Гость')+'</div><div class="profile-bio">'+(currentBio||'Нажмите чтобы добавить описание')+'</div><div class="profile-status">🟢 Онлайн</div></div><div class="settings-group"><div class="setting-item" onclick="editBio()"><span class="setting-label">✏️ Редактировать описание</span></div><div class="setting-item" onclick="shareApp()"><span class="setting-label">🔗 Поделиться</span></div><div class="setting-item" onclick="logout()" style="border-left:3px solid #ff4444"><span class="setting-label" style="color:#ff4444">🚪 Выйти</span></div></div>';}
 function editBio(){const bio=prompt('Введите описание:',currentBio||'');if(bio!==null){currentBio=bio;socket.emit('update_bio',{name:currentUser,bio});renderSettings();}}
 function handleAvatar(e){const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=(ev)=>{currentAvatar=ev.target.result;socket.emit('update_avatar',{name:currentUser,avatar:ev.target.result});renderSettings();showNotification('Аватар обновлен!');};r.readAsDataURL(f);e.target.value='';}
 function logout(){if(!confirm('Выйти?'))return;socket.emit('logout',{token:currentToken});localStorage.removeItem('shugramm_token');localStorage.removeItem('shugramm_user');currentUser=null;location.reload();}
 function shareApp(){socket.emit('share_link');}
-function openProfile(name){if(name===currentUser)return;fetch('/api/user/'+name).then(r=>r.json()).then(d=>{if(d.error){showNotification(d.error);return;}const avatar=d.avatar?'<img src="'+d.avatar+'">':d.name[0];$('profileContent').innerHTML='<div class="profile-modal-avatar">'+avatar+'</div><div class="profile-modal-name">'+d.name+'</div><div class="profile-modal-bio">'+(d.bio||'Нет описания')+'</div><div class="profile-modal-status '+(d.status==='online'?'online':'offline')+'">'+(d.status==='online'?'Онлайн':'Не в сети')+'</div><div class="profile-modal-posts"><div class="profile-modal-posts-title">Посты ('+d.posts.length+')</div>'+(d.posts.length?d.posts.map(p=>'<div class="profile-modal-post"><span class="p-time">'+p.time+'</span><span class="p-caption">'+(p.caption||'Без описания')+'</span></div>').join(''):'<div style="color:var(--text-secondary);font-size:12px">Нет постов</div>')+'</div><button class="profile-modal-btn" onclick="startPrivateChat(\''+d.name+'\')"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg> Написать</button>';$('profileModal').classList.add('open');});}
+function openProfile(name){if(name===currentUser)return;fetch('/api/user/'+name).then(r=>r.json()).then(d=>{if(d.error){showNotification(d.error);return;}const avatar=d.avatar?'<img src="'+d.avatar+'">':d.name[0];$('profileContent').innerHTML='<div class="profile-modal-avatar">'+avatar+'</div><div class="profile-modal-name">'+d.name+'</div><div class="profile-modal-bio">'+(d.bio||'Нет описания')+'</div><div class="profile-modal-status '+(d.status==='online'?'online':'offline')+'">'+(d.status==='online'?'🟢 Онлайн':'⚫ Не в сети')+'</div><div class="profile-modal-posts"><div class="profile-modal-posts-title">📸 Посты ('+d.posts.length+')</div>'+(d.posts.length?d.posts.map(p=>'<div class="profile-modal-post"><span class="p-time">'+p.time+'</span><span class="p-caption">'+(p.caption||'Без описания')+'</span></div>').join(''):'<div style="color:var(--text-secondary);font-size:12px">Нет постов</div>')+'</div><button class="profile-modal-btn" onclick="startPrivateChat(\''+d.name+'\')">💬 Написать</button>';$('profileModal').classList.add('open');});}
 function closeProfile(){$('profileModal').classList.remove('open');}
 function openMedia(src,type){const viewer=$('mediaViewer');viewer.classList.add('open');if(type==='image'){$('mediaImg').src=src;$('mediaImg').style.display='block';$('mediaVideo').style.display='none';}else{$('mediaVideo').src=src;$('mediaVideo').style.display='block';$('mediaImg').style.display='none';$('mediaVideo').play();}}
 function closeMedia(){$('mediaViewer').classList.remove('open');$('mediaVideo').pause();}
