@@ -4,29 +4,77 @@ from datetime import datetime, timedelta
 import random, time, os, hashlib, json, re, base64, io
 from functools import wraps
 import threading
+import secrets
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'directme-secret-key')
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=500*1024*1024)
 
-# ========== ДАННЫЕ ==========
-users = {}
-posts = {}
-stories = {}
-private_chats = {}
-group_chats = {}
-pending = {}
-unread = {}
-typing_users = {}
-message_reactions = {}
-message_replies = {}
-pinned_messages = {}
-blocked_users = {}
-saved_posts = {}
-reposts = {}
-user_status_history = {}
+# ============================================================
+#  БАЗА ДАННЫХ (ВСЁ В ПАМЯТИ + JSON)
+# ============================================================
+users = {}                # name -> {sid, phone, username, password, avatar, status, bio, token, last_seen, created_at, is_verified, is_banned}
+posts = {}                # post_id -> {id, author, avatar, content, media_type, caption, hashtags, likes, comments, saved_by, reposts, time, timestamp}
+stories = {}              # name -> [{id, content, type, timestamp, views}]
+private_chats = {}        # chat_id -> {users: [u1,u2], messages: [...]}
+group_chats = {}          # chat_id -> {name, admin, members: [...], messages: [...], avatar, created_at}
+pending = {}              # phone -> {code, time}
+unread = {}               # user -> {chat_id: count}
+typing_users = {}         # chat_id -> {name: timestamp}
+message_reactions = {}    # msg_id -> {user: emoji}
+message_replies = {}      # msg_id -> [reply_msg_id]
+pinned_messages = {}      # chat_id -> [msg_id]
+blocked_users = {}        # user -> [blocked_user]
+saved_posts = {}          # user -> [post_id]
+reposts = {}              # post_id -> [user]
+user_status_history = {}  # user -> {status, time}
+user_typing = {}          # chat_id -> {user: timestamp}
+voice_messages = {}       # msg_id -> audio_data
+forwarded_messages = {}   # msg_id -> original_msg_id
+user_last_seen = {}       # user -> timestamp
+user_online_status = {}   # user -> bool
+chat_participants = {}    # chat_id -> [users]
+message_views = {}        # msg_id -> [user]
+user_contacts = {}        # user -> [contact_name]
+user_favorites = {}       # user -> [post_id]
+user_blocked = {}         # user -> [blocked_user]
+user_reports = {}         # user -> [reported_user]
+user_notifications = {}   # user -> [{type, from, content, time, read}]
+user_settings = {}        # user -> {theme, notifications, privacy}
+user_activity = {}        # user -> {last_active, online}
+user_devices = {}         # user -> [device_id]
+user_sessions = {}        # user -> [token]
+user_emails = {}          # user -> email
+user_phones = {}          # user -> phone
+user_two_factor = {}      # user -> {enabled, secret}
+user_api_keys = {}        # user -> [api_key]
+user_webhooks = {}        # user -> [webhook_url]
+user_bots = {}            # user -> [bot_id]
+user_channels = {}        # user -> [channel_id]
+user_polls = {}           # poll_id -> {question, options, votes, created_by, created_at}
+user_quizzes = {}         # quiz_id -> {question, options, correct_answer, created_by, created_at}
+user_events = {}          # event_id -> {title, description, date, location, created_by, attendees}
+user_tasks = {}           # task_id -> {title, description, due_date, assigned_to, created_by, status}
+user_notes = {}           # note_id -> {title, content, created_by, created_at}
+user_files = {}           # file_id -> {name, size, type, content, created_by, created_at}
+user_links = {}           # link_id -> {url, title, description, created_by, created_at}
+user_locations = {}       # location_id -> {name, latitude, longitude, created_by}
+user_contacts_list = {}   # user -> [contact]
+user_groups = {}          # user -> [group_id]
+user_channels_list = {}   # user -> [channel_id]
+user_bots_list = {}       # user -> [bot_id]
+user_polls_list = {}      # user -> [poll_id]
+user_quizzes_list = {}    # user -> [quiz_id]
+user_events_list = {}     # user -> [event_id]
+user_tasks_list = {}      # user -> [task_id]
+user_notes_list = {}      # user -> [note_id]
+user_files_list = {}      # user -> [file_id]
+user_links_list = {}      # user -> [link_id]
+user_locations_list = {}  # user -> [location_id]
 
-# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+# ============================================================
+#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ============================================================
 def hash_pass(password):
     salt = os.urandom(32).hex()
     return salt + ':' + hashlib.sha256((salt + password).encode()).hexdigest()
@@ -60,13 +108,17 @@ def save_data():
         'unread': unread,
         'blocked_users': blocked_users,
         'saved_posts': saved_posts,
-        'reposts': reposts
+        'reposts': reposts,
+        'pinned_messages': pinned_messages,
+        'user_settings': user_settings,
+        'user_contacts': user_contacts,
+        'user_favorites': user_favorites
     }
     with open('directme_data.json', 'w') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def load_data():
-    global users, posts, stories, private_chats, group_chats, unread, blocked_users, saved_posts, reposts
+    global users, posts, stories, private_chats, group_chats, unread, blocked_users, saved_posts, reposts, pinned_messages, user_settings, user_contacts, user_favorites
     try:
         with open('directme_data.json', 'r') as f:
             data = json.load(f)
@@ -79,12 +131,18 @@ def load_data():
             blocked_users = data.get('blocked_users', {})
             saved_posts = data.get('saved_posts', {})
             reposts = data.get('reposts', {})
+            pinned_messages = data.get('pinned_messages', {})
+            user_settings = data.get('user_settings', {})
+            user_contacts = data.get('user_contacts', {})
+            user_favorites = data.get('user_favorites', {})
     except:
         pass
 
 load_data()
 
-# ========== ДЕКОРАТОРЫ ==========
+# ============================================================
+#  ДЕКОРАТОРЫ
+# ============================================================
 def auth_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -97,7 +155,9 @@ def auth_required(f):
         return jsonify({'error': 'Недействительный токен'}), 401
     return decorated
 
-# ========== HTTP РОУТЫ ==========
+# ============================================================
+#  HTTP РОУТЫ
+# ============================================================
 @app.route('/')
 def index():
     return render_template_string(HTML)
@@ -134,11 +194,57 @@ def get_stories(user, name):
     for n, story_list in stories.items():
         if n != name and n not in blocked_users.get(name, []):
             for story in story_list:
-                if time.time() - story['timestamp'] < 86400:  # 24 часа
+                if time.time() - story['timestamp'] < 86400:
                     active_stories[n] = story
                     break
     return jsonify({'stories': active_stories})
-# ========== WEBSOCKET: АУТЕНТИФИКАЦИЯ ==========
+
+@app.route('/api/chats')
+@auth_required
+def get_chats(user, name):
+    chats = []
+    for chat_id, chat in private_chats.items():
+        if name in chat['users']:
+            other = [u for u in chat['users'] if u != name][0]
+            chats.append({'id': chat_id, 'name': other, 'avatar': users.get(other, {}).get('avatar'), 'last_msg': chat['messages'][-1]['content'] if chat['messages'] else '', 'unread': unread.get(name, {}).get(chat_id, 0)})
+    for chat_id, chat in group_chats.items():
+        if name in chat['members']:
+            chats.append({'id': chat_id, 'name': chat['name'], 'avatar': chat.get('avatar'), 'last_msg': chat['messages'][-1]['content'] if chat['messages'] else '', 'unread': unread.get(name, {}).get(chat_id, 0), 'is_group': True})
+    return jsonify({'chats': chats})
+
+@app.route('/api/messages/<chat_id>')
+@auth_required
+def get_messages(user, name, chat_id):
+    if chat_id in private_chats:
+        if name not in private_chats[chat_id]['users']:
+            return jsonify({'error': 'Нет доступа'}), 403
+        return jsonify({'messages': private_chats[chat_id]['messages'][-200:]})
+    elif chat_id in group_chats:
+        if name not in group_chats[chat_id]['members']:
+            return jsonify({'error': 'Нет доступа'}), 403
+        return jsonify({'messages': group_chats[chat_id]['messages'][-200:]})
+    return jsonify({'error': 'Чат не найден'}), 404
+
+@app.route('/api/user/<name>')
+@auth_required
+def get_user_profile(user, name, target_name):
+    if target_name not in users:
+        return jsonify({'error': 'Пользователь не найден'}), 404
+    target = users[target_name]
+    return jsonify({
+        'name': target_name,
+        'username': target.get('username', target_name),
+        'avatar': target.get('avatar'),
+        'bio': target.get('bio', ''),
+        'status': target.get('status', 'offline'),
+        'last_seen': target.get('last_seen', 0),
+        'created_at': target.get('created_at', 0),
+        'posts_count': len([p for p in posts.values() if p['author'] == target_name]),
+        'followers': len([u for u in users.values() if target_name in u.get('contacts', [])])
+    })
+# ============================================================
+#  WEBSOCKET: АУТЕНТИФИКАЦИЯ И РЕГИСТРАЦИЯ
+# ============================================================
 @socketio.on('connect')
 def handle_connect():
     print(f"Client connected: {request.sid}")
@@ -162,7 +268,7 @@ def register(data):
         return
     code = str(random.randint(100000, 999999))
     pending[phone] = {'code': code, 'time': time.time()}
-    print(f"Code for {phone}: {code}")
+    print(f"📱 Код для {phone}: {code}")
     emit('code_sent', {'phone': phone, 'code': code})
 
 @socketio.on('verify_code')
@@ -217,7 +323,22 @@ def create_user(data):
         return
     
     token = generate_token()
-    users[name] = {'sid': request.sid, 'phone': phone, 'username': username, 'password': hash_pass(password), 'avatar': None, 'status': 'online', 'bio': '', 'token': token, 'last_seen': time.time(), 'created_at': time.time()}
+    users[name] = {
+        'sid': request.sid,
+        'phone': phone,
+        'username': username,
+        'password': hash_pass(password),
+        'avatar': None,
+        'status': 'online',
+        'bio': '',
+        'token': token,
+        'last_seen': time.time(),
+        'created_at': time.time(),
+        'is_verified': False,
+        'is_banned': False,
+        'contacts': [],
+        'favorites': []
+    }
     unread[name] = {}
     user_status_history[name] = {'status': 'online', 'time': time.time()}
     save_data()
@@ -244,8 +365,19 @@ def login(data):
     users[name]['last_seen'] = time.time()
     user_status_history[name] = {'status': 'online', 'time': time.time()}
     save_data()
-    emit('login_success', {'name': name, 'username': users[name].get('username', name), 'token': token, 'avatar': users[name].get('avatar'), 'bio': users[name].get('bio', '')})
-    emit('user_joined', {'name': name, 'username': users[name].get('username', name), 'avatar': users[name].get('avatar'), 'status': 'online'}, broadcast=True)
+    emit('login_success', {
+        'name': name,
+        'username': users[name].get('username', name),
+        'token': token,
+        'avatar': users[name].get('avatar'),
+        'bio': users[name].get('bio', '')
+    })
+    emit('user_joined', {
+        'name': name,
+        'username': users[name].get('username', name),
+        'avatar': users[name].get('avatar'),
+        'status': 'online'
+    }, broadcast=True)
 
 @socketio.on('auto_login')
 def auto_login(data):
@@ -260,10 +392,24 @@ def auto_login(data):
             user['last_seen'] = time.time()
             user_status_history[name] = {'status': 'online', 'time': time.time()}
             save_data()
-            emit('login_success', {'name': name, 'username': user.get('username', name), 'token': token, 'avatar': user.get('avatar'), 'bio': user.get('bio', '')})
-            emit('user_joined', {'name': name, 'username': user.get('username', name), 'avatar': user.get('avatar'), 'status': 'online'}, broadcast=True)
+            emit('login_success', {
+                'name': name,
+                'username': user.get('username', name),
+                'token': token,
+                'avatar': user.get('avatar'),
+                'bio': user.get('bio', '')
+            })
+            emit('user_joined', {
+                'name': name,
+                'username': user.get('username', name),
+                'avatar': user.get('avatar'),
+                'status': 'online'
+            }, broadcast=True)
             return
- # ========== WEBSOCKET: СООБЩЕНИЯ ==========
+
+# ============================================================
+#  WEBSOCKET: СООБЩЕНИЯ (ТЕКСТ, ФОТО, ВИДЕО, ГОЛОС)
+# ============================================================
 @socketio.on('send_message')
 def send_message(data):
     name = data.get('name', '')
@@ -276,11 +422,10 @@ def send_message(data):
     if name not in users:
         return
     
-    # Проверка блокировки
     if chat in private_chats:
         for member in private_chats[chat]['users']:
             if member != name and is_blocked(name, member):
-                emit('error', {'message': 'Вы заблокированы или заблокировали пользователя'})
+                emit('error', {'message': 'Вы заблокированы'})
                 return
     
     if msg_type == 'text':
@@ -303,7 +448,9 @@ def send_message(data):
         'replies': [],
         'reply_to': reply_to,
         'forwarded_from': forwarded_from,
-        'read_by': [name]
+        'read_by': [name],
+        'views': [name],
+        'is_pinned': False
     }
     
     if chat in private_chats:
@@ -312,15 +459,17 @@ def send_message(data):
             private_chats[chat]['messages'] = private_chats[chat]['messages'][-300:]
         save_data()
         emit('new_message', {'chat': chat, 'message': msg}, room=chat)
-        
         for member in private_chats[chat]['users']:
             if member != name:
                 unread.setdefault(member, {})
                 unread[member][chat] = unread[member].get(chat, 0) + 1
-                total_unread = sum(unread[member].values())
                 if users.get(member, {}).get('sid'):
-                    emit('unread_update', {'chat': chat, 'count': unread[member][chat], 'total': total_unread}, room=users[member]['sid'])
-                    emit('push_notification', {'from': name, 'content': content[:100] + ('...' if len(content) > 100 else ''), 'chat_id': chat, 'msg_id': msg['id']}, room=users[member]['sid'])
+                    emit('push_notification', {
+                        'from': name,
+                        'content': content[:100] + ('...' if len(content) > 100 else ''),
+                        'chat_id': chat,
+                        'msg_id': msg['id']
+                    }, room=users[member]['sid'])
     
     elif chat in group_chats:
         if name not in group_chats[chat]['members']:
@@ -330,13 +479,17 @@ def send_message(data):
             group_chats[chat]['messages'] = group_chats[chat]['messages'][-300:]
         save_data()
         emit('new_message', {'chat': chat, 'message': msg}, room=chat)
-        
         for member in group_chats[chat]['members']:
             if member != name:
                 unread.setdefault(member, {})
                 unread[member][chat] = unread[member].get(chat, 0) + 1
                 if users.get(member, {}).get('sid'):
-                    emit('push_notification', {'from': name, 'content': content[:100] + ('...' if len(content) > 100 else ''), 'chat_id': chat, 'msg_id': msg['id']}, room=users[member]['sid'])
+                    emit('push_notification', {
+                        'from': name,
+                        'content': content[:100] + ('...' if len(content) > 100 else ''),
+                        'chat_id': chat,
+                        'msg_id': msg['id']
+                    }, room=users[member]['sid'])
 
 @socketio.on('join_chat')
 def join_chat(data):
@@ -352,23 +505,18 @@ def join_chat(data):
             return
     else:
         return
-    
     join_room(chat)
     if name in unread:
         unread[name][chat] = 0
-    
     msgs = []
     if chat in private_chats:
         msgs = private_chats[chat]['messages'][-200:]
     elif chat in group_chats:
         msgs = group_chats[chat]['messages'][-200:]
-    
-    # Отметка о прочтении
     for msg in msgs:
         if msg['name'] != name and name not in msg.get('read_by', []):
             msg['read_by'] = msg.get('read_by', []) + [name]
     save_data()
-    
     emit('chat_history', {'messages': msgs, 'chat': chat})
 
 @socketio.on('typing')
@@ -376,7 +524,7 @@ def typing(data):
     chat = data.get('chat', '')
     name = data.get('name', '')
     is_typing = data.get('typing', False)
-    if is_blocked(name, chat) if chat in private_chats else False:
+    if chat in private_chats and is_blocked(name, [u for u in private_chats[chat]['users'] if u != name][0]):
         return
     typing_users[chat] = typing_users.get(chat, {})
     if is_typing:
@@ -392,7 +540,6 @@ def mark_read(data):
     msg_id = data.get('msg_id', '')
     if name not in users:
         return
-    
     if chat in private_chats:
         for msg in private_chats[chat]['messages']:
             if msg['id'] == msg_id and name not in msg.get('read_by', []):
@@ -400,17 +547,17 @@ def mark_read(data):
         save_data()
         emit('read_update', {'chat': chat, 'msg_id': msg_id, 'read_by': msg['read_by']}, room=chat)
 
-# ========== WEBSOCKET: РЕАКЦИИ ==========
+# ============================================================
+#  WEBSOCKET: РЕАКЦИИ И РЕПЛАИ
+# ============================================================
 @socketio.on('message_reaction')
 def message_reaction(data):
     chat = data.get('chat', '')
     msg_id = data.get('msg_id', '')
     name = data.get('name', '')
     reaction = data.get('reaction', '')
-    
-    if name not in users or reaction not in ['❤️', '🔥', '👍', '👎', '😂', '😮', '😡', '🥰', '😱']:
+    if name not in users or reaction not in ['❤️', '🔥', '👍', '👎', '😂', '😮', '😡', '🥰', '😱', '💯', '👏', '🙌', '🎉']:
         return
-    
     msgs = []
     if chat in private_chats:
         msgs = private_chats[chat]['messages']
@@ -418,7 +565,6 @@ def message_reaction(data):
         msgs = group_chats[chat]['messages']
     else:
         return
-    
     for msg in msgs:
         if msg['id'] == msg_id:
             if name in msg['reactions'] and msg['reactions'][name] == reaction:
@@ -429,18 +575,14 @@ def message_reaction(data):
             emit('reaction_updated', {'chat': chat, 'msg_id': msg_id, 'reactions': msg['reactions']}, room=chat)
             break
 
-# ========== WEBSOCKET: РЕПЛАИ ==========
 @socketio.on('reply_message')
 def reply_message(data):
     chat = data.get('chat', '')
     msg_id = data.get('msg_id', '')
     name = data.get('name', '')
     reply_text = data.get('reply', '')[:500]
-    
     if name not in users:
         return
-    
-    # Находим оригинальное сообщение
     msgs = []
     if chat in private_chats:
         msgs = private_chats[chat]['messages']
@@ -448,17 +590,13 @@ def reply_message(data):
         msgs = group_chats[chat]['messages']
     else:
         return
-    
     original = None
     for msg in msgs:
         if msg['id'] == msg_id:
             original = msg
             break
-    
     if not original:
         return
-    
-    # Отправляем ответ как отдельное сообщение с ссылкой на оригинал
     reply_msg = {
         'id': f"m{int(time.time()*1000)}_{random.randint(1000, 9999)}",
         'name': name,
@@ -475,9 +613,9 @@ def reply_message(data):
         'edited': False,
         'reactions': {},
         'replies': [],
-        'read_by': [name]
+        'read_by': [name],
+        'views': [name]
     }
-    
     if chat in private_chats:
         private_chats[chat]['messages'].append(reply_msg)
         save_data()
@@ -486,19 +624,94 @@ def reply_message(data):
         group_chats[chat]['messages'].append(reply_msg)
         save_data()
         emit('new_message', {'chat': chat, 'message': reply_msg}, room=chat)
-# ========== WEBSOCKET: ГРУППОВЫЕ ЧАТЫ ==========
+
+# ============================================================
+#  WEBSOCKET: ПЕРЕСЫЛКА И ЗАКРЕПЛЕНИЕ
+# ============================================================
+@socketio.on('forward_message')
+def forward_message(data):
+    chat = data.get('chat', '')
+    msg_id = data.get('msg_id', '')
+    name = data.get('name', '')
+    target_user = data.get('to', '')
+    if name not in users or target_user not in users:
+        return
+    msgs = []
+    if chat in private_chats:
+        msgs = private_chats[chat]['messages']
+    elif chat in group_chats:
+        msgs = group_chats[chat]['messages']
+    else:
+        return
+    original = None
+    for msg in msgs:
+        if msg['id'] == msg_id:
+            original = msg
+            break
+    if not original:
+        return
+    chat_id = f"p_{min(name, target_user)}_{max(name, target_user)}"
+    if chat_id not in private_chats:
+        private_chats[chat_id] = {'users': [name, target_user], 'messages': []}
+        save_data()
+    forward_msg = {
+        'id': f"m{int(time.time()*1000)}_{random.randint(1000, 9999)}",
+        'name': name,
+        'type': original['type'],
+        'content': original['content'],
+        'time': datetime.now().strftime("%H:%M"),
+        'timestamp': time.time(),
+        'avatar': users[name].get('avatar'),
+        'edited': False,
+        'reactions': {},
+        'replies': [],
+        'forwarded_from': original['name'],
+        'read_by': [name],
+        'views': [name]
+    }
+    private_chats[chat_id]['messages'].append(forward_msg)
+    save_data()
+    join_room(chat_id)
+    emit('new_message', {'chat': chat_id, 'message': forward_msg}, room=chat_id)
+
+@socketio.on('pin_message')
+def pin_message(data):
+    chat = data.get('chat', '')
+    msg_id = data.get('msg_id', '')
+    name = data.get('name', '')
+    if chat in group_chats and group_chats[chat]['admin'] != name:
+        return
+    msgs = []
+    if chat in private_chats:
+        msgs = private_chats[chat]['messages']
+    elif chat in group_chats:
+        msgs = group_chats[chat]['messages']
+    else:
+        return
+    for m in msgs:
+        if m['id'] == msg_id:
+            if msg_id in pinned_messages.get(chat, []):
+                pinned_messages[chat].remove(msg_id)
+                m['is_pinned'] = False
+            else:
+                pinned_messages.setdefault(chat, []).append(msg_id)
+                m['is_pinned'] = True
+            save_data()
+            emit('message_pinned', {'chat': chat, 'msg_id': msg_id, 'pinned': m['is_pinned']}, room=chat)
+            break
+# ============================================================
+#  WEBSOCKET: ГРУППОВЫЕ ЧАТЫ
+# ============================================================
 @socketio.on('create_group')
 def create_group(data):
     name = data.get('name', '')
     group_name = data.get('group_name', 'Новая группа')
     members = data.get('members', [])
-    
     if name not in users:
         return
     if len(members) < 2:
         emit('error', {'message': 'Нужно минимум 2 участника'})
         return
-    
     chat_id = f"g_{int(time.time()*1000)}_{random.randint(1000, 9999)}"
     group_chats[chat_id] = {
         'name': group_name,
@@ -520,7 +733,6 @@ def add_group_member(data):
     chat = data.get('chat', '')
     name = data.get('name', '')
     new_member = data.get('member', '')
-    
     if chat not in group_chats:
         return
     if group_chats[chat]['admin'] != name:
@@ -531,7 +743,6 @@ def add_group_member(data):
     if new_member not in users:
         emit('error', {'message': 'Пользователь не найден'})
         return
-    
     group_chats[chat]['members'].append(new_member)
     save_data()
     if users.get(new_member, {}).get('sid'):
@@ -543,7 +754,6 @@ def remove_group_member(data):
     chat = data.get('chat', '')
     name = data.get('name', '')
     remove_user = data.get('user', '')
-    
     if chat not in group_chats:
         return
     if group_chats[chat]['admin'] != name:
@@ -554,21 +764,20 @@ def remove_group_member(data):
     if remove_user == group_chats[chat]['admin']:
         emit('error', {'message': 'Нельзя удалить админа'})
         return
-    
     group_chats[chat]['members'].remove(remove_user)
     save_data()
     emit('group_updated', {'chat': chat, 'members': group_chats[chat]['members']}, room=chat)
 
-# ========== WEBSOCKET: СТОРИС ==========
+# ============================================================
+#  WEBSOCKET: СТОРИС
+# ============================================================
 @socketio.on('create_story')
 def create_story(data):
     name = data.get('name', '')
     content = data.get('content', '')
     media_type = data.get('type', 'image')
-    
     if name not in users:
         return
-    
     story = {
         'id': f"s{int(time.time()*1000)}_{random.randint(1000, 9999)}",
         'name': name,
@@ -577,15 +786,11 @@ def create_story(data):
         'timestamp': time.time(),
         'views': []
     }
-    
     stories.setdefault(name, []).append(story)
     if len(stories[name]) > 10:
         stories[name] = stories[name][-10:]
     save_data()
-    
     emit('new_story', {'name': name, 'story': story}, broadcast=True)
-    
-    # Автоудаление через 24 часа
     threading.Timer(86400, lambda: delete_story_after_time(name, story['id'])).start()
 
 def delete_story_after_time(name, story_id):
@@ -599,7 +804,6 @@ def view_story(data):
     name = data.get('name', '')
     story_id = data.get('story_id', '')
     viewer = data.get('viewer', '')
-    
     if name in stories:
         for story in stories[name]:
             if story['id'] == story_id and viewer not in story['views']:
@@ -608,7 +812,9 @@ def view_story(data):
                 emit('story_viewed', {'name': name, 'story_id': story_id, 'views': story['views']}, broadcast=True)
                 break
 
-# ========== WEBSOCKET: ПОСТЫ ==========
+# ============================================================
+#  WEBSOCKET: ПОСТЫ (СО ВСЕМИ ФУНКЦИЯМИ)
+# ============================================================
 @socketio.on('create_post')
 def create_post(data):
     name = data.get('name', '')
@@ -616,12 +822,10 @@ def create_post(data):
     media_type = data.get('media_type', 'image')
     caption = data.get('caption', '')[:500]
     hashtags = re.findall(r'#(\w+)', caption)
-    
     if name not in users:
         return
     if len(content) > 500000:
         content = content[:500000]
-    
     post_id = f"p{int(time.time()*1000)}_{random.randint(1000, 9999)}"
     posts[post_id] = {
         'id': post_id,
@@ -695,7 +899,10 @@ def repost_post(data):
         posts[post_id]['reposts'].append(name)
         save_data()
         emit('post_updated', {'post': posts[post_id]}, broadcast=True)
-# ========== WEBSOCKET: ПРОФИЛЬ ==========
+
+# ============================================================
+#  WEBSOCKET: ПРОФИЛЬ (АВАТАР, БИО, РЕДАКТИРОВАНИЕ)
+# ============================================================
 @socketio.on('update_avatar')
 def update_avatar(data):
     name = data.get('name', '')
@@ -719,16 +926,12 @@ def update_profile(data):
     name = data.get('name', '')
     new_name = data.get('new_name', '').strip()
     new_username = data.get('new_username', '').strip().lower()
-    
     if name not in users:
         return
-    
     if new_name and len(new_name) >= 2 and len(new_name) <= 20:
         if re.match(r'^[a-zA-Zа-яА-Я0-9_]+$', new_name) and new_name not in users:
-            # Переименовываем пользователя
             user_data = users.pop(name)
             users[new_name] = user_data
-            # Обновляем в чатах
             for chat_id, chat in private_chats.items():
                 if name in chat['users']:
                     chat['users'] = [new_name if u == name else u for u in chat['users']]
@@ -740,7 +943,6 @@ def update_profile(data):
             save_data()
             emit('profile_updated', {'old_name': name, 'new_name': new_name}, broadcast=True)
             return
-    
     if new_username and len(new_username) >= 3 and len(new_username) <= 20:
         if re.match(r'^[a-zA-Z0-9_]+$', new_username):
             for n, u in users.items():
@@ -751,7 +953,9 @@ def update_profile(data):
             save_data()
             emit('username_updated', {'name': name, 'username': new_username}, broadcast=True)
 
-# ========== WEBSOCKET: БЛОКИРОВКА ==========
+# ============================================================
+#  WEBSOCKET: БЛОКИРОВКА
+# ============================================================
 @socketio.on('block_user')
 def block_user(data):
     name = data.get('name', '')
@@ -772,12 +976,13 @@ def unblock_user(data):
         save_data()
         emit('user_unblocked', {'by': name, 'unblocked': unblock_name}, room=users[unblock_name].get('sid') if users[unblock_name].get('sid') else '')
 
-# ========== WEBSOCKET: ПОИСК ==========
+# ============================================================
+#  WEBSOCKET: ПОИСК
+# ============================================================
 @socketio.on('search_users')
 def search_users(data):
     query = data.get('query', '').lower()
     name = data.get('name', '')
-    
     results = []
     for n, u in users.items():
         if n != name and n not in blocked_users.get(name, []):
@@ -794,14 +999,13 @@ def search_hashtag(data):
             results.append(post)
     emit('search_results', {'posts': results[:30]})
 
-# ========== WEBSOCKET: УДАЛЕНИЕ И РЕДАКТИРОВАНИЕ ==========
-@socketio.on('delete_message')
-def delete_message(data):
+@socketio.on('search_messages')
+def search_messages(data):
     chat = data.get('chat', '')
-    msg_id = data.get('msg_id', '')
+    query = data.get('query', '').lower()
     name = data.get('name', '')
-    delete_for_all = data.get('delete_for_all', False)
-    
+    if name not in users:
+        return
     msgs = []
     if chat in private_chats:
         msgs = private_chats[chat]['messages']
@@ -809,7 +1013,24 @@ def delete_message(data):
         msgs = group_chats[chat]['messages']
     else:
         return
-    
+    results = [m for m in msgs if query in m['content'].lower()]
+    emit('search_results', {'messages': results[:50]})
+# ============================================================
+#  WEBSOCKET: УДАЛЕНИЕ И РЕДАКТИРОВАНИЕ
+# ============================================================
+@socketio.on('delete_message')
+def delete_message(data):
+    chat = data.get('chat', '')
+    msg_id = data.get('msg_id', '')
+    name = data.get('name', '')
+    delete_for_all = data.get('delete_for_all', False)
+    msgs = []
+    if chat in private_chats:
+        msgs = private_chats[chat]['messages']
+    elif chat in group_chats:
+        msgs = group_chats[chat]['messages']
+    else:
+        return
     for i, m in enumerate(msgs):
         if m['id'] == msg_id:
             if m['name'] == name or (chat in group_chats and group_chats[chat]['admin'] == name):
@@ -828,7 +1049,6 @@ def edit_message(data):
     msg_id = data.get('msg_id', '')
     name = data.get('name', '')
     new_content = data.get('content', '')[:5000]
-    
     msgs = []
     if chat in private_chats:
         msgs = private_chats[chat]['messages']
@@ -836,7 +1056,6 @@ def edit_message(data):
         msgs = group_chats[chat]['messages']
     else:
         return
-    
     for m in msgs:
         if m['id'] == msg_id and m['name'] == name:
             m['content'] = new_content
@@ -845,34 +1064,9 @@ def edit_message(data):
             emit('message_edited', {'chat': chat, 'message': m}, room=chat)
             break
 
-@socketio.on('pin_message')
-def pin_message(data):
-    chat = data.get('chat', '')
-    msg_id = data.get('msg_id', '')
-    name = data.get('name', '')
-    
-    if chat in group_chats and group_chats[chat]['admin'] != name:
-        return
-    
-    msgs = []
-    if chat in private_chats:
-        msgs = private_chats[chat]['messages']
-    elif chat in group_chats:
-        msgs = group_chats[chat]['messages']
-    else:
-        return
-    
-    for m in msgs:
-        if m['id'] == msg_id:
-            if msg_id in pinned_messages.get(chat, []):
-                pinned_messages[chat].remove(msg_id)
-            else:
-                pinned_messages.setdefault(chat, []).append(msg_id)
-            save_data()
-            emit('message_pinned', {'chat': chat, 'msg_id': msg_id}, room=chat)
-            break
-
-# ========== WEBSOCKET: ОСТАЛЬНОЕ ==========
+# ============================================================
+#  WEBSOCKET: ПОЛЬЗОВАТЕЛИ И ЧАТЫ
+# ============================================================
 @socketio.on('logout')
 def logout(data):
     token = data.get('token', '')
@@ -892,7 +1086,14 @@ def get_users(data):
     user_list = []
     for n, u in users.items():
         if n != name and n not in blocked_users.get(name, []):
-            user_list.append({'name': n, 'username': u.get('username', n), 'avatar': u.get('avatar'), 'status': u.get('status', 'offline'), 'bio': u.get('bio', ''), 'last_seen': u.get('last_seen', 0)})
+            user_list.append({
+                'name': n,
+                'username': u.get('username', n),
+                'avatar': u.get('avatar'),
+                'status': u.get('status', 'offline'),
+                'bio': u.get('bio', ''),
+                'last_seen': u.get('last_seen', 0)
+            })
     emit('users_list', {'users': user_list})
 
 @socketio.on('start_private_chat')
@@ -902,7 +1103,7 @@ def start_private_chat(data):
     if user1 not in users or user2 not in users:
         return
     if is_blocked(user1, user2):
-        emit('error', {'message': 'Вы заблокированы или заблокировали пользователя'})
+        emit('error', {'message': 'Вы заблокированы'})
         return
     chat_id = f"p_{min(user1, user2)}_{max(user1, user2)}"
     if chat_id not in private_chats:
@@ -912,13 +1113,24 @@ def start_private_chat(data):
     if user1 in unread:
         unread[user1][chat_id] = 0
     msgs = private_chats[chat_id]['messages'][-200:]
-    emit('private_chat', {'chat_id': chat_id, 'user': user2, 'avatar': users[user2].get('avatar'), 'messages': msgs, 'is_group': False})
+    emit('private_chat', {
+        'chat_id': chat_id,
+        'user': user2,
+        'avatar': users[user2].get('avatar'),
+        'messages': msgs,
+        'is_group': False
+    })
 
 @socketio.on('share_link')
 def share_link():
     emit('share_link', {'url': request.host})
-HTML='''
-<!DOCTYPE html>
+
+
+# ============================================================
+#  HTML (ВЕСЬ КОД СТРАНИЦЫ — CSS, HTML, JAVASCRIPT)
+#  ВНИМАНИЕ: ЭТО ОГРОМНАЯ СТРОКА
+# ============================================================
+HTML = '''<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
@@ -1039,7 +1251,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
 .post-time { font-size: 10px; color: var(--text-secondary); margin-left: auto; }
 .post-media { width: 100%; max-height: 350px; object-fit: cover; cursor: pointer; background: var(--bg-input); }
 .post-caption { padding: 6px 12px; font-size: 12px; line-height: 1.4; }
-.post-actions { display: flex; padding: 4px 12px 8px; gap: 16px; border-top: 0.5px solid var(--border); flex-wrap: wrap; }
+.post-actions { display: flex; padding: 4px 12px 8px; gap: 12px; border-top: 0.5px solid var(--border); flex-wrap: wrap; }
 .post-action { background: none; border: none; color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; gap: 4px; font-size: 12px; padding: 2px 6px; border-radius: 6px; transition: all 0.2s; }
 .post-action:hover { color: var(--text); }
 .post-action:active { transform: scale(0.92); }
@@ -1113,7 +1325,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
 .story-name { font-size: 10px; color: var(--text-secondary); text-align: center; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 56px; }
 @media (max-width: 480px) { .msg { max-width: 92%; } .msg-bubble img, .msg-bubble video { max-width: 150px; } .push-notification { min-width: unset; width: 92%; } }
 </style>
-<!-- PUSH УВЕДОМЛЕНИЕ -->
+</head>
+<body>
 <div class="push-notification" id="pushNotification" onclick="openChatFromPush()">
     <div class="pn-header">
         <div class="pn-avatar" id="pnAvatar"></div>
@@ -1124,10 +1337,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
         <button class="pn-close" onclick="event.stopPropagation();closePush()">✕</button>
     </div>
 </div>
-
-<!-- APP -->
 <div id="app">
-    <!-- HEADER -->
     <div class="header">
         <div class="header-left">
             <svg class="logo-icon" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
@@ -1142,11 +1352,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
             </button>
         </div>
     </div>
-
-    <!-- СТОРИС (добавляется динамически) -->
     <div id="storiesRow" class="stories-row" style="display:none;"></div>
-
-    <!-- СТРАНИЦЫ -->
     <div class="page active" id="pageChats"><div id="chatList"></div></div>
     <div class="page" id="pageUsers">
         <div style="padding:6px 10px;position:sticky;top:0;background:var(--bg);z-index:5">
@@ -1156,8 +1362,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
     </div>
     <div class="page" id="pagePosts"><div id="postsList"></div></div>
     <div class="page" id="pageSettings"><div id="settingsContent"></div></div>
-
-    <!-- ЧАТ ОКНО -->
     <div id="chatWindow">
         <div class="header" style="border-bottom:0.5px solid var(--border);flex-shrink:0">
             <button class="btn-icon" onclick="closeChat()">
@@ -1183,8 +1387,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
             </button>
         </div>
     </div>
-
-    <!-- НАВИГАЦИЯ -->
     <div class="nav" id="nav" style="display:none">
         <div class="nav-item active" onclick="switchPage('chats')">
             <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
@@ -1205,20 +1407,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
         </div>
     </div>
 </div>
-
-<!-- МЕДИА-ПРОСМОТР -->
 <div class="media-viewer" id="mediaViewer">
     <button class="media-close" onclick="closeMedia()">✕</button>
     <img id="mediaImg" style="display:none">
     <video id="mediaVideo" controls style="display:none"></video>
 </div>
-
-<!-- СКРЫТЫЕ INPUTS -->
 <input type="file" id="fileInput" accept="image/*,video/*" style="display:none" onchange="handleFile(event)">
 <input type="file" id="avatarInput" accept="image/*" style="display:none" onchange="handleAvatar(event)">
 <input type="file" id="postInput" accept="image/*,video/*" style="display:none" onchange="handlePost(event)">
-
-<!-- ЛОГИН -->
 <div id="loginScreen">
     <div class="login-card">
         <div id="loginStep1">
@@ -1255,52 +1451,25 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
         </div>
     </div>
 </div>
-</head>
-<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.min.js"></script>
 <script>
 // ============================================================
-//  DIRECTME - ПОЛНЫЙ JAVASCRIPT
+//  ПОЛНЫЙ JAVASCRIPT
 // ============================================================
-
 const socket = io();
-let currentUser = null;
-let currentToken = null;
-let currentChat = null;
-let currentChatName = '';
-let currentAvatar = null;
-let currentBio = '';
-let currentUsername = '';
-let typingTimeout = null;
-let isChatOpen = false;
-let isRecording = false;
-let mediaRecorder = null;
-let audioChunks = [];
-let unreadData = {};
-let privateChats = JSON.parse(localStorage.getItem('private_chats') || '[]');
-let pushData = null;
-let pushTimeout = null;
-let currentPhone = '';
-let currentLoginName = '';
+let currentUser = null, currentToken = null, currentChat = null, currentChatName = '';
+let currentAvatar = null, currentBio = '', currentUsername = '', typingTimeout = null;
+let isChatOpen = false, isRecording = false, mediaRecorder = null, audioChunks = [];
+let unreadData = {}, privateChats = JSON.parse(localStorage.getItem('private_chats') || '[]');
+let pushData = null, pushTimeout = null, currentPhone = '', currentLoginName = '';
 
-// ============================================================
-//  DOM ЭЛЕМЕНТЫ
-// ============================================================
 const $ = id => document.getElementById(id);
-const chatList = $('chatList');
-const usersList = $('usersList');
-const postsList = $('postsList');
-const settingsContent = $('settingsContent');
-const totalBadge = $('totalBadge');
-const chatWindow = $('chatWindow');
-const messagesContainer = $('messagesContainer');
-const chatTitle = $('chatTitle');
-const msgInput = $('msgInput');
-const typingIndicator = $('typingIndicator');
+const chatList = $('chatList'), usersList = $('usersList'), postsList = $('postsList');
+const settingsContent = $('settingsContent'), totalBadge = $('totalBadge');
+const chatWindow = $('chatWindow'), messagesContainer = $('messagesContainer');
+const chatTitle = $('chatTitle'), msgInput = $('msgInput'), typingIndicator = $('typingIndicator');
 const storiesRow = $('storiesRow');
 
-// ============================================================
-//  ТЕМА (ЧЕРНО-ЖЕЛТАЯ / СВЕТЛАЯ)
-// ============================================================
 function toggleTheme() {
     document.body.classList.toggle('light');
     const isLight = document.body.classList.contains('light');
@@ -1317,14 +1486,8 @@ function loadTheme() {
     }
 }
 
-// ============================================================
-//  УВЕДОМЛЕНИЯ (PUSH)
-// ============================================================
 function showPush(from, content, chatId) {
-    const el = $('pushNotification');
-    const avatar = $('pnAvatar');
-    const name = $('pnName');
-    const text = $('pnText');
+    const el = $('pushNotification'), avatar = $('pnAvatar'), name = $('pnName'), text = $('pnText');
     const user = Object.values(users).find(u => u.name === from);
     avatar.innerHTML = (user && user.avatar) ? `<img src="${user.avatar}">` : from[0];
     name.textContent = from;
@@ -1335,102 +1498,41 @@ function showPush(from, content, chatId) {
     pushTimeout = setTimeout(closePush, 5000);
 }
 
-function closePush() {
-    const el = $('pushNotification');
-    if (el) el.classList.remove('show');
-    pushData = null;
-}
+function closePush() { const el = $('pushNotification'); if (el) el.classList.remove('show'); pushData = null; }
+function openChatFromPush() { if (pushData) { closePush(); openPrivateChat(pushData.chatId, pushData.from); } }
 
-function openChatFromPush() {
-    if (pushData) {
-        closePush();
-        openPrivateChat(pushData.chatId, pushData.from);
-    }
-}
-
-// ============================================================
-//  ЛОГИН / РЕГИСТРАЦИЯ
-// ============================================================
 function requestCode() {
     const phone = $('phoneInput').value.trim();
-    if (phone.length < 10) {
-        showToast('Введите корректный номер');
-        return;
-    }
+    if (phone.length < 10) { showToast('Введите корректный номер'); return; }
     socket.emit('register', { phone });
 }
 
 function verifyCode() {
     const code = $('codeInput').value.trim();
-    if (code.length !== 6) {
-        showToast('Введите 6 цифр');
-        return;
-    }
+    if (code.length !== 6) { showToast('Введите 6 цифр'); return; }
     socket.emit('verify_code', { phone: currentPhone, code });
 }
 
 function registerUser() {
-    const name = $('regName').value.trim();
-    const username = $('regUsername').value.trim().toLowerCase();
-    const password = $('regPassword').value.trim();
-
-    if (!name || name.length < 2 || name.length > 20) {
-        showToast('Имя 2-20 символов');
-        return;
-    }
-    if (!/^[a-zA-Zа-яА-Я0-9_]+$/.test(name)) {
-        showToast('Недопустимые символы в имени');
-        return;
-    }
-    if (!username || username.length < 3 || username.length > 20) {
-        showToast('Юзернейм 3-20 символов');
-        return;
-    }
-    if (!/^[a-zA-Z0-9_]+$/.test(username)) {
-        showToast('Юзернейм только латиница');
-        return;
-    }
-    if (password.length < 4) {
-        showToast('Пароль минимум 4 символа');
-        return;
-    }
-
+    const name = $('regName').value.trim(), username = $('regUsername').value.trim().toLowerCase(), password = $('regPassword').value.trim();
+    if (!name || name.length < 2 || name.length > 20) { showToast('Имя 2-20 символов'); return; }
+    if (!/^[a-zA-Zа-яА-Я0-9_]+$/.test(name)) { showToast('Недопустимые символы'); return; }
+    if (!username || username.length < 3 || username.length > 20) { showToast('Юзернейм 3-20 символов'); return; }
+    if (!/^[a-zA-Z0-9_]+$/.test(username)) { showToast('Юзернейм только латиница'); return; }
+    if (password.length < 4) { showToast('Пароль минимум 4'); return; }
     socket.emit('create_user', { phone: currentPhone, name, username, password });
 }
 
 function loginUser() {
     const password = $('loginPassword').value.trim();
-    if (!password) {
-        showToast('Введите пароль');
-        return;
-    }
+    if (!password) { showToast('Введите пароль'); return; }
     socket.emit('login', { name: currentLoginName, password });
 }
 
-function backToPhone() {
-    $('loginStep2').classList.add('hidden');
-    $('loginStep1').classList.remove('hidden');
-}
+function backToPhone() { $('loginStep2').classList.add('hidden'); $('loginStep1').classList.remove('hidden'); }
+function backToStart() { $('loginStep4').classList.add('hidden'); $('loginStep1').classList.remove('hidden'); }
+function showToast(msg) { const el = document.createElement('div'); el.className = 'toast'; el.textContent = msg; document.body.appendChild(el); setTimeout(() => el.remove(), 2500); }
 
-function backToStart() {
-    $('loginStep4').classList.add('hidden');
-    $('loginStep1').classList.remove('hidden');
-}
-
-// ============================================================
-//  TOAST / УВЕДОМЛЕНИЯ
-// ============================================================
-function showToast(msg) {
-    const el = document.createElement('div');
-    el.className = 'toast';
-    el.textContent = msg;
-    document.body.appendChild(el);
-    setTimeout(() => el.remove(), 2500);
-}
-
-// ============================================================
-//  SOCKET СОБЫТИЯ
-// ============================================================
 socket.on('code_sent', (data) => {
     currentPhone = data.phone;
     $('loginStep1').classList.add('hidden');
@@ -1463,65 +1565,39 @@ socket.on('login_success', (data) => {
     enterApp();
 });
 
-socket.on('error', (data) => {
-    showToast(data.message);
-});
+socket.on('error', (data) => { showToast(data.message); });
 
 socket.on('push_notification', (data) => {
     showPush(data.from, data.content, data.chat_id);
-    if ($('pageUsers').classList.contains('active')) {
-        switchPage('chats');
-    }
+    if ($('pageUsers').classList.contains('active')) switchPage('chats');
 });
 
 socket.on('new_message', (data) => {
-    if (data.chat === currentChat && isChatOpen) {
-        renderMessage(data.message);
-        scrollToBottom();
-    }
-    if (data.chat !== currentChat || !isChatOpen) {
-        unreadData[data.chat] = (unreadData[data.chat] || 0) + 1;
-        updateBadge();
-    }
+    if (data.chat === currentChat && isChatOpen) { renderMessage(data.message); scrollToBottom(); }
+    if (data.chat !== currentChat || !isChatOpen) { unreadData[data.chat] = (unreadData[data.chat] || 0) + 1; updateBadge(); }
     renderChats();
 });
 
 socket.on('chat_history', (data) => {
     messagesContainer.innerHTML = '';
-    if (data.messages) {
-        data.messages.forEach(m => renderMessage(m));
-        scrollToBottom();
-    }
+    if (data.messages) { data.messages.forEach(m => renderMessage(m)); scrollToBottom(); }
 });
 
 socket.on('typing_status', (data) => {
-    if (data.typing) {
-        typingIndicator.textContent = data.name + ' печатает...';
-        typingIndicator.classList.add('show');
-    } else {
-        typingIndicator.classList.remove('show');
-    }
+    if (data.typing) { typingIndicator.textContent = data.name + ' печатает...'; typingIndicator.classList.add('show'); }
+    else { typingIndicator.classList.remove('show'); }
 });
 
-socket.on('users_list', (data) => {
-    renderUsersList(data.users);
-});
-
-socket.on('private_chat', (data) => {
-    openPrivateChat(data.chat_id, data.user, data.avatar, data.messages);
-});
+socket.on('users_list', (data) => { renderUsersList(data.users); });
+socket.on('private_chat', (data) => { openPrivateChat(data.chat_id, data.user, data.avatar, data.messages); });
 
 socket.on('avatar_updated', (data) => {
     if (data.name === currentUser) currentAvatar = data.avatar;
-    renderChats();
-    renderUsers();
+    renderChats(); renderUsers();
 });
 
 socket.on('bio_updated', (data) => {
-    if (data.name === currentUser) {
-        currentBio = data.bio;
-        renderSettings();
-    }
+    if (data.name === currentUser) { currentBio = data.bio; renderSettings(); }
 });
 
 socket.on('new_post', (data) => {
@@ -1562,11 +1638,8 @@ socket.on('message_edited', (data) => {
 
 socket.on('share_link', (data) => {
     const url = 'https://' + data.url;
-    if (navigator.clipboard) {
-        navigator.clipboard.writeText(url).then(() => showToast('Ссылка скопирована!'));
-    } else {
-        prompt('Ссылка:', url);
-    }
+    if (navigator.clipboard) { navigator.clipboard.writeText(url).then(() => showToast('Ссылка скопирована!')); }
+    else { prompt('Ссылка:', url); }
 });
 
 socket.on('reaction_updated', (data) => {
@@ -1595,9 +1668,6 @@ socket.on('reaction_updated', (data) => {
     }
 });
 
-// ============================================================
-//  ЗАПУСК ПРИЛОЖЕНИЯ
-// ============================================================
 function enterApp() {
     $('loginScreen').classList.add('hidden');
     $('nav').style.display = 'flex';
@@ -1610,49 +1680,37 @@ function enterApp() {
     setInterval(() => socket.emit('get_posts'), 60000);
 }
 
-// ============================================================
-//  НАВИГАЦИЯ
-// ============================================================
 function switchPage(page) {
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-
     if (page === 'chats') {
         $('pageChats').classList.add('active');
         document.querySelector('.nav-item:nth-child(1)').classList.add('active');
         renderChats();
         $('headerFab').style.display = 'none';
-        storiesRow.style.display = 'flex';
+        if (storiesRow) storiesRow.style.display = 'flex';
     } else if (page === 'users') {
         $('pageUsers').classList.add('active');
         document.querySelector('.nav-item:nth-child(2)').classList.add('active');
         socket.emit('get_users', { name: currentUser });
         $('headerFab').style.display = 'none';
-        storiesRow.style.display = 'none';
+        if (storiesRow) storiesRow.style.display = 'none';
     } else if (page === 'posts') {
         $('pagePosts').classList.add('active');
         document.querySelector('.nav-item:nth-child(3)').classList.add('active');
         socket.emit('get_posts');
         $('headerFab').style.display = 'flex';
-        storiesRow.style.display = 'none';
+        if (storiesRow) storiesRow.style.display = 'none';
     } else {
         $('pageSettings').classList.add('active');
         document.querySelector('.nav-item:nth-child(4)').classList.add('active');
         renderSettings();
         $('headerFab').style.display = 'none';
-        storiesRow.style.display = 'none';
+        if (storiesRow) storiesRow.style.display = 'none';
     }
-
-    if (isChatOpen) {
-        chatWindow.classList.remove('open');
-        chatWindow.style.display = 'none';
-        isChatOpen = false;
-    }
+    if (isChatOpen) { chatWindow.classList.remove('open'); chatWindow.style.display = 'none'; isChatOpen = false; }
 }
 
-// ============================================================
-//  ЧАТЫ
-// ============================================================
 function renderChats() {
     if (!privateChats.length) {
         chatList.innerHTML = `<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><h3>Нет чатов</h3><p>Найдите людей в разделе "Люди"</p></div>`;
@@ -1681,9 +1739,7 @@ function renderChats() {
     updateBadge();
 }
 
-function renderUsers() {
-    socket.emit('get_users', { name: currentUser });
-}
+function renderUsers() { socket.emit('get_users', { name: currentUser }); }
 
 function renderUsersList(users) {
     if (!users || !users.length) {
@@ -1747,14 +1803,14 @@ function viewProfile(name) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector('.nav-item:nth-child(1)').classList.add('active');
     $('headerFab').style.display = 'none';
-    storiesRow.style.display = 'none';
+    if (storiesRow) storiesRow.style.display = 'none';
 }
 
 function closeProfile() {
     $('pageChats').innerHTML = '<div id="chatList"></div>';
     renderChats();
     $('pageChats').classList.add('active');
-    storiesRow.style.display = 'flex';
+    if (storiesRow) storiesRow.style.display = 'flex';
 }
 
 function startPrivateChat(name) {
@@ -1766,29 +1822,22 @@ function openPrivateChat(chatId, name, avatar, messages) {
     currentChat = chatId;
     currentChatName = name;
     isChatOpen = true;
-
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     chatWindow.classList.add('open');
     chatWindow.style.display = 'flex';
     chatTitle.textContent = name;
     messagesContainer.innerHTML = '';
-
-    if (messages) {
-        messages.forEach(m => renderMessage(m));
-        scrollToBottom();
-    }
-
+    if (messages) { messages.forEach(m => renderMessage(m)); scrollToBottom(); }
     const exists = privateChats.some(c => c.id === chatId);
     if (!exists) {
         privateChats.push({ id: chatId, name, avatar: avatar || name[0], lastMsg: '' });
         localStorage.setItem('private_chats', JSON.stringify(privateChats));
     }
-
     if (unreadData[chatId]) { unreadData[chatId] = 0; updateBadge(); }
     socket.emit('join_chat', { chat: chatId, name: currentUser });
     msgInput.focus();
     renderChats();
-    storiesRow.style.display = 'none';
+    if (storiesRow) storiesRow.style.display = 'none';
 }
 
 function closeChat() {
@@ -1798,7 +1847,7 @@ function closeChat() {
     $('pageChats').classList.add('active');
     document.querySelector('.nav-item:nth-child(1)').classList.add('active');
     renderChats();
-    storiesRow.style.display = 'flex';
+    if (storiesRow) storiesRow.style.display = 'flex';
 }
 
 function deleteChat() {
@@ -1821,9 +1870,7 @@ function sendMessage() {
 function handleTyping() {
     if (typingTimeout) clearTimeout(typingTimeout);
     socket.emit('typing', { chat: currentChat, name: currentUser, typing: true });
-    typingTimeout = setTimeout(() => {
-        socket.emit('typing', { chat: currentChat, name: currentUser, typing: false });
-    }, 1500);
+    typingTimeout = setTimeout(() => { socket.emit('typing', { chat: currentChat, name: currentUser, typing: false }); }, 1500);
 }
 
 function renderMessage(msg) {
@@ -1831,21 +1878,15 @@ function renderMessage(msg) {
     const div = document.createElement('div');
     div.className = 'msg' + (isSelf ? ' self' : '');
     div.dataset.msgId = msg.id;
-
     let content = msg.content;
-    if (msg.type === 'image') {
-        content = `<img src="${msg.content}" onclick="openMedia('${msg.content}','image')">`;
-    } else if (msg.type === 'video') {
-        content = `<video src="${msg.content}" controls></video>`;
-    } else if (msg.type === 'voice') {
-        content = `<audio src="${msg.content}" controls></audio>`;
-    } else {
+    if (msg.type === 'image') content = `<img src="${msg.content}" onclick="openMedia('${msg.content}','image')">`;
+    else if (msg.type === 'video') content = `<video src="${msg.content}" controls></video>`;
+    else if (msg.type === 'voice') content = `<audio src="${msg.content}" controls></audio>`;
+    else {
         content = msg.content.replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        // Хештеги и упоминания
         content = content.replace(/#(\w+)/g, '<span style="color:var(--primary-light);cursor:pointer;" onclick="searchHashtag(\'$1\')">#$1</span>');
         content = content.replace(/@(\w+)/g, '<span style="color:var(--primary);cursor:pointer;" onclick="viewProfile(\'$1\')">@$1</span>');
     }
-
     const avatar = msg.avatar ? `<img src="${msg.avatar}">` : msg.name[0];
     const actions = isSelf ? `
         <div class="msg-actions">
@@ -1859,14 +1900,10 @@ function renderMessage(msg) {
             <button onclick="forwardMessage('${msg.id}')">➡</button>
         </div>
     `;
-
-    // Реплай индикатор
     let replyHtml = '';
     if (msg.reply_to) {
         replyHtml = `<div class="msg-reply-indicator">↳ ${msg.reply_to.name}: ${msg.reply_to.content}</div>`;
     }
-
-    // Реакции
     let reactionsHtml = '';
     if (msg.reactions && Object.keys(msg.reactions).length > 0) {
         const counts = {};
@@ -1879,12 +1916,9 @@ function renderMessage(msg) {
         }
         reactionsHtml += '</div>';
     }
-
-    // Кнопки реакций
     const reactionBtns = ['❤️', '🔥', '👍', '😂', '😮'].map(e =>
         `<span onclick="addReaction('${msg.id}','${e}')" style="cursor:pointer;padding:0 3px;font-size:13px;">${e}</span>`
     ).join('');
-
     div.innerHTML = `
         <div class="msg-avatar">${avatar}</div>
         <div>
@@ -1937,23 +1971,14 @@ function toggleReaction(msgId, reaction) {
     socket.emit('message_reaction', { chat: currentChat, msg_id: msgId, name: currentUser, reaction });
 }
 
-function scrollToBottom() {
-    setTimeout(() => messagesContainer.scrollTop = messagesContainer.scrollHeight, 50);
-}
+function scrollToBottom() { setTimeout(() => messagesContainer.scrollTop = messagesContainer.scrollHeight, 50); }
 
 function updateBadge() {
     const total = Object.values(unreadData).reduce((a,b) => a + b, 0);
-    if (total > 0) {
-        totalBadge.textContent = total;
-        totalBadge.style.display = 'flex';
-    } else {
-        totalBadge.style.display = 'none';
-    }
+    if (total > 0) { totalBadge.textContent = total; totalBadge.style.display = 'flex'; }
+    else { totalBadge.style.display = 'none'; }
 }
 
-// ============================================================
-//  ГОЛОСОВЫЕ СООБЩЕНИЯ
-// ============================================================
 function toggleRecording() {
     if (isRecording) {
         if (mediaRecorder) mediaRecorder.stop();
@@ -1992,9 +2017,6 @@ function toggleRecording() {
         .catch(() => showToast('Нет доступа к микрофону'));
 }
 
-// ============================================================
-//  ФАЙЛЫ (ИЗОБРАЖЕНИЯ, ВИДЕО)
-// ============================================================
 function handleFile(e) {
     const file = e.target.files[0];
     if (!file) return;
@@ -2011,9 +2033,6 @@ function handleFile(e) {
     e.target.value = '';
 }
 
-// ============================================================
-//  ПОСТЫ
-// ============================================================
 function createPost() { $('postInput').click(); }
 
 function handlePost(e) {
@@ -2043,7 +2062,6 @@ function renderPost(p) {
     const comments = p.comments || [];
     const hasComments = comments.length > 0;
     const username = users[p.author]?.username || p.author;
-
     return `
         <div class="post-card" id="post-${p.id}">
             <div class="post-header">
@@ -2097,17 +2115,9 @@ function toggleComments(postId) {
     if (wrap) wrap.classList.toggle('open');
 }
 
-function likePost(postId) {
-    socket.emit('like_post', { post_id: postId, name: currentUser });
-}
-
-function savePost(postId) {
-    socket.emit('save_post', { post_id: postId, name: currentUser });
-}
-
-function repostPost(postId) {
-    socket.emit('repost_post', { post_id: postId, name: currentUser });
-}
+function likePost(postId) { socket.emit('like_post', { post_id: postId, name: currentUser }); }
+function savePost(postId) { socket.emit('save_post', { post_id: postId, name: currentUser }); }
+function repostPost(postId) { socket.emit('repost_post', { post_id: postId, name: currentUser }); }
 
 function sendComment(postId) {
     const input = document.getElementById('comment-' + postId);
@@ -2119,11 +2129,7 @@ function sendComment(postId) {
 
 function deletePost(postId) {
     if (!confirm('Удалить пост?')) return;
-    fetch('/delete_post', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pid: postId, n: currentUser })
-    });
+    fetch('/delete_post', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pid: postId, n: currentUser }) });
     setTimeout(() => socket.emit('get_posts'), 500);
 }
 
@@ -2139,9 +2145,6 @@ function searchHashtag(tag) {
     });
 }
 
-// ============================================================
-//  НАСТРОЙКИ
-// ============================================================
 function renderSettings() {
     const avatar = currentAvatar ? `<img src="${currentAvatar}">` : (currentUser ? currentUser[0] : '?');
     settingsContent.innerHTML = `
@@ -2164,11 +2167,7 @@ function renderSettings() {
 
 function editBio() {
     const bio = prompt('Введите описание:', currentBio || '');
-    if (bio !== null) {
-        currentBio = bio;
-        socket.emit('update_bio', { name: currentUser, bio });
-        renderSettings();
-    }
+    if (bio !== null) { currentBio = bio; socket.emit('update_bio', { name: currentUser, bio }); renderSettings(); }
 }
 
 function editProfile() {
@@ -2204,13 +2203,8 @@ function logout() {
     location.reload();
 }
 
-function shareApp() {
-    socket.emit('share_link');
-}
+function shareApp() { socket.emit('share_link'); }
 
-// ============================================================
-//  МЕДИА-ПРОСМОТР
-// ============================================================
 function openMedia(src, type) {
     const viewer = $('mediaViewer');
     viewer.classList.add('open');
@@ -2232,31 +2226,27 @@ function closeMedia() {
     $('mediaVideo').pause();
 }
 
-// ============================================================
-//  АВТО-ВХОД
-// ============================================================
 const savedToken = localStorage.getItem('directme_token');
 const savedUser = localStorage.getItem('directme_user');
-if (savedToken && savedUser) {
-    socket.emit('auto_login', { token: savedToken });
-}
+if (savedToken && savedUser) { socket.emit('auto_login', { token: savedToken }); }
 
-// ============================================================
-//  КЛАВИАТУРА
-// ============================================================
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
         if ($('mediaViewer').classList.contains('open')) closeMedia();
         else if (isChatOpen) closeChat();
     }
 });
+
 console.log('💬 DirectMe загружен!');
-    </script>
+</script>
 </body>
 </html>
 '''
 
-# ========== ЗАПУСК ==========
+
+# ============================================================
+#  ЗАПУСК
+# ============================================================
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
