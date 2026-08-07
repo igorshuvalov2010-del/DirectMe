@@ -1881,60 +1881,41 @@ document.addEventListener('keydown', (e) => {
 
 console.log('💬 DirectMe загружен!');
 <script>
-    // ===== ЭКСТРЕННЫЙ ФИКС ДЛЯ КНОПКИ =====
-    console.log('🔧 Фикс загружен!');
-    
-    // Принудительно создаем функцию loginOrRegister
-    window.loginOrRegister = function() {
-        console.log('📞 Кнопка нажата!');
-        var username = document.getElementById('regUsername').value.trim().toLowerCase();
-        var password = document.getElementById('regPassword').value.trim();
-        
-        if (!username || username.length < 3 || username.length > 20) {
-            showToast('Юзернейм 3-20 символов (латиница, цифры, _)');
-            return;
-        }
-        if (!/^[a-zA-Z0-9_]+$/.test(username)) {
-            showToast('Юзернейм: только латиница, цифры, _');
-            return;
-        }
-        if (password.length < 4) {
-            showToast('Пароль минимум 4 символа');
-            return;
-        }
-        
-        // Пытаемся войти
-        socket.emit('login', { username: username, password: password });
-        
-        var registered = false;
-        socket.once('login_success', function() { 
-            registered = true; 
-            console.log('✅ Вход выполнен!');
-        });
-        socket.once('error', function(data) {
-            console.log('❌ Ошибка:', data.message);
-            if (data.message === 'Пользователь не найден' && !registered) {
-                console.log('🆕 Регистрируем...');
-                socket.emit('register', { username: username, password: password });
+// ===== ЭКСТРЕННЫЙ ФИКС ДЛЯ SAFARI iOS =====
+document.addEventListener('DOMContentLoaded', function() {
+    var btn = document.querySelector('.form-btn');
+    if (btn) {
+        btn.setAttribute('type', 'button');
+        btn.addEventListener('click', function(e) {
+            e.preventDefault();
+            var username = document.getElementById('regUsername').value.trim().toLowerCase();
+            var password = document.getElementById('regPassword').value.trim();
+            
+            if (!username || username.length < 3 || username.length > 20) {
+                showToast('Юзернейм 3-20 символов');
+                return;
             }
+            if (!/^[a-zA-Z0-9_]+$/.test(username)) {
+                showToast('Юзернейм: латиница, цифры, _');
+                return;
+            }
+            if (password.length < 4) {
+                showToast('Пароль минимум 4 символа');
+                return;
+            }
+            
+            socket.emit('login', { username: username, password: password });
+            var registered = false;
+            socket.once('login_success', function() { registered = true; });
+            socket.once('error', function(data) {
+                if (data.message === 'Пользователь не найден' && !registered) {
+                    socket.emit('register', { username: username, password: password });
+                }
+            });
         });
-    };
-    
-    // Принудительно вешаем обработчик на кнопку
-    document.addEventListener('DOMContentLoaded', function() {
-        var btn = document.querySelector('.form-btn');
-        if (btn) {
-            console.log('✅ Кнопка найдена!');
-            btn.onclick = function(e) {
-                e.preventDefault();
-                window.loginOrRegister();
-            };
-        } else {
-            console.log('❌ Кнопка НЕ найдена!');
-        }
-    });
-    
-    console.log('✅ Фикс установлен!');
+        console.log('✅ Кнопка починена для Safari!');
+    }
+});
 </script>
 </script>
 </body>
