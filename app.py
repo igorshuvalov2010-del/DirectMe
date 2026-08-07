@@ -1,20 +1,32 @@
 from flask import Flask, render_template_string, request, jsonify
 from flask_socketio import SocketIO, emit, join_room, leave_room
-from datetime import datetime
-import random, time, os, hashlib, json, re
+from datetime import datetime, timedelta
+import random, time, os, hashlib, json, re, base64, io
 from functools import wraps
+import threading
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'directme-secret-key')
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=100*1024*1024)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=500*1024*1024)
 
+# ========== ДАННЫЕ ==========
 users = {}
-posts = []
+posts = {}
+stories = {}
 private_chats = {}
+group_chats = {}
 pending = {}
 unread = {}
 typing_users = {}
+message_reactions = {}
+message_replies = {}
+pinned_messages = {}
+blocked_users = {}
+saved_posts = {}
+reposts = {}
+user_status_history = {}
 
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def hash_pass(password):
     salt = os.urandom(32).hex()
     return salt + ':' + hashlib.sha256((salt + password).encode()).hexdigest()
@@ -26,25 +38,53 @@ def verify_pass(password, hashed):
 def generate_token():
     return hashlib.sha256(str(random.random()).encode()).hexdigest()[:32]
 
+def get_user_by_name(name):
+    return users.get(name)
+
+def get_user_by_username(username):
+    for name, user in users.items():
+        if user.get('username') == username:
+            return name, user
+    return None, None
+
+def is_blocked(user1, user2):
+    return user2 in blocked_users.get(user1, []) or user1 in blocked_users.get(user2, [])
+
 def save_data():
-    data = {'users': users, 'posts': posts, 'private_chats': private_chats, 'unread': unread}
+    data = {
+        'users': users,
+        'posts': posts,
+        'stories': stories,
+        'private_chats': private_chats,
+        'group_chats': group_chats,
+        'unread': unread,
+        'blocked_users': blocked_users,
+        'saved_posts': saved_posts,
+        'reposts': reposts
+    }
     with open('directme_data.json', 'w') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def load_data():
-    global users, posts, private_chats, unread
+    global users, posts, stories, private_chats, group_chats, unread, blocked_users, saved_posts, reposts
     try:
         with open('directme_data.json', 'r') as f:
             data = json.load(f)
             users = data.get('users', {})
-            posts = data.get('posts', [])
+            posts = data.get('posts', {})
+            stories = data.get('stories', {})
             private_chats = data.get('private_chats', {})
+            group_chats = data.get('group_chats', {})
             unread = data.get('unread', {})
+            blocked_users = data.get('blocked_users', {})
+            saved_posts = data.get('saved_posts', {})
+            reposts = data.get('reposts', {})
     except:
         pass
 
 load_data()
 
+# ========== ДЕКОРАТОРЫ ==========
 def auth_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -57,6 +97,7 @@ def auth_required(f):
         return jsonify({'error': 'Недействительный токен'}), 401
     return decorated
 
+# ========== HTTP РОУТЫ ==========
 @app.route('/')
 def index():
     return render_template_string(HTML)
@@ -64,14 +105,14 @@ def index():
 @app.route('/api/posts')
 @auth_required
 def get_posts_api(user, name):
-    return jsonify({'posts': posts[:30]})
+    return jsonify({'posts': list(posts.values())[:30]})
 
 @app.route('/api/users')
 @auth_required
 def get_users_api(user, name):
     user_list = []
     for n, u in users.items():
-        if n != name:
+        if n != name and n not in blocked_users.get(name, []):
             user_list.append({'name': n, 'username': u.get('username', n), 'avatar': u.get('avatar'), 'status': u.get('status', 'offline'), 'bio': u.get('bio', '')})
     return jsonify({'users': user_list})
 
@@ -80,14 +121,24 @@ def delete_post():
     data = request.get_json()
     pid = data.get('pid', '')
     name = data.get('n', '')
-    global posts
-    for i, p in enumerate(posts):
-        if p['id'] == pid and p['author'] == name:
-            posts.pop(i)
-            save_data()
-            break
-    return {'ok': True}
+    if pid in posts and posts[pid]['author'] == name:
+        del posts[pid]
+        save_data()
+        return {'ok': True}
+    return {'ok': False}, 403
 
+@app.route('/api/stories')
+@auth_required
+def get_stories(user, name):
+    active_stories = {}
+    for n, story_list in stories.items():
+        if n != name and n not in blocked_users.get(name, []):
+            for story in story_list:
+                if time.time() - story['timestamp'] < 86400:  # 24 часа
+                    active_stories[n] = story
+                    break
+    return jsonify({'stories': active_stories})
+# ========== WEBSOCKET: АУТЕНТИФИКАЦИЯ ==========
 @socketio.on('connect')
 def handle_connect():
     print(f"Client connected: {request.sid}")
@@ -98,7 +149,8 @@ def handle_disconnect():
         if user.get('sid') == request.sid:
             user['status'] = 'offline'
             user['sid'] = ''
-            emit('user_status', {'name': name, 'status': 'offline'}, broadcast=True)
+            user_status_history[name] = {'status': 'offline', 'time': time.time()}
+            emit('user_status', {'name': name, 'status': 'offline', 'last_seen': time.time()}, broadcast=True)
             save_data()
             break
 
@@ -140,33 +192,36 @@ def create_user(data):
     name = data.get('name', '').strip()
     username = data.get('username', '').strip().lower()
     password = data.get('password', '')
+    
     if not name or len(name) < 2 or len(name) > 20:
-        emit('error', {'message': 'Имя должно быть от 2 до 20 символов'})
+        emit('error', {'message': 'Имя 2-20 символов'})
         return
     if not re.match(r'^[a-zA-Zа-яА-Я0-9_]+$', name):
-        emit('error', {'message': 'Имя содержит недопустимые символы'})
+        emit('error', {'message': 'Недопустимые символы'})
         return
     if not username or len(username) < 3 or len(username) > 20:
-        emit('error', {'message': 'Юзернейм должен быть от 3 до 20 символов'})
+        emit('error', {'message': 'Юзернейм 3-20 символов'})
         return
     if not re.match(r'^[a-zA-Z0-9_]+$', username):
-        emit('error', {'message': 'Юзернейм только латиница, цифры и _'})
+        emit('error', {'message': 'Юзернейм: латиница, цифры, _'})
         return
     if name in users:
         emit('error', {'message': 'Пользователь уже существует'})
         return
     for u in users.values():
         if u.get('username') == username:
-            emit('error', {'message': 'Юзернейм уже занят'})
+            emit('error', {'message': 'Юзернейм занят'})
             return
     if len(password) < 4:
         emit('error', {'message': 'Пароль минимум 4 символа'})
         return
+    
     token = generate_token()
-    users[name] = {'sid': request.sid, 'phone': phone, 'username': username, 'password': hash_pass(password), 'avatar': None, 'status': 'online', 'bio': '', 'token': token, 'last_seen': time.time()}
+    users[name] = {'sid': request.sid, 'phone': phone, 'username': username, 'password': hash_pass(password), 'avatar': None, 'status': 'online', 'bio': '', 'token': token, 'last_seen': time.time(), 'created_at': time.time()}
     unread[name] = {}
+    user_status_history[name] = {'status': 'online', 'time': time.time()}
     save_data()
-    emit('login_success', {'name': name, 'username': username, 'token': token, 'avatar': None})
+    emit('login_success', {'name': name, 'username': username, 'token': token, 'avatar': None, 'bio': ''})
     emit('user_joined', {'name': name, 'username': username, 'avatar': None, 'status': 'online'}, broadcast=True)
 
 @socketio.on('login')
@@ -176,6 +231,9 @@ def login(data):
     if name not in users:
         emit('error', {'message': 'Пользователь не найден'})
         return
+    if users[name].get('is_banned', False):
+        emit('error', {'message': 'Аккаунт заблокирован'})
+        return
     if not verify_pass(password, users[name]['password']):
         emit('error', {'message': 'Неверный пароль'})
         return
@@ -184,8 +242,9 @@ def login(data):
     users[name]['status'] = 'online'
     users[name]['token'] = token
     users[name]['last_seen'] = time.time()
+    user_status_history[name] = {'status': 'online', 'time': time.time()}
     save_data()
-    emit('login_success', {'name': name, 'username': users[name].get('username', name), 'token': token, 'avatar': users[name].get('avatar')})
+    emit('login_success', {'name': name, 'username': users[name].get('username', name), 'token': token, 'avatar': users[name].get('avatar'), 'bio': users[name].get('bio', '')})
     emit('user_joined', {'name': name, 'username': users[name].get('username', name), 'avatar': users[name].get('avatar'), 'status': 'online'}, broadcast=True)
 
 @socketio.on('auto_login')
@@ -193,51 +252,123 @@ def auto_login(data):
     token = data.get('token', '')
     for name, user in users.items():
         if user.get('token') == token:
+            if user.get('is_banned', False):
+                emit('error', {'message': 'Аккаунт заблокирован'})
+                return
             user['sid'] = request.sid
             user['status'] = 'online'
             user['last_seen'] = time.time()
+            user_status_history[name] = {'status': 'online', 'time': time.time()}
             save_data()
-            emit('login_success', {'name': name, 'username': user.get('username', name), 'token': token, 'avatar': user.get('avatar')})
+            emit('login_success', {'name': name, 'username': user.get('username', name), 'token': token, 'avatar': user.get('avatar'), 'bio': user.get('bio', '')})
             emit('user_joined', {'name': name, 'username': user.get('username', name), 'avatar': user.get('avatar'), 'status': 'online'}, broadcast=True)
             return
-
+ # ========== WEBSOCKET: СООБЩЕНИЯ ==========
 @socketio.on('send_message')
 def send_message(data):
     name = data.get('name', '')
     chat = data.get('chat', '')
     msg_type = data.get('type', 'text')
     content = data.get('content', '')
-    if name not in users or chat not in private_chats:
+    reply_to = data.get('reply_to', None)
+    forwarded_from = data.get('forwarded_from', None)
+    
+    if name not in users:
         return
+    
+    # Проверка блокировки
+    if chat in private_chats:
+        for member in private_chats[chat]['users']:
+            if member != name and is_blocked(name, member):
+                emit('error', {'message': 'Вы заблокированы или заблокировали пользователя'})
+                return
+    
     if msg_type == 'text':
-        content = content[:2000]
+        content = content[:5000]
     elif msg_type in ['image', 'video']:
-        content = content[:150000]
-    msg = {'id': f"m{int(time.time()*1000)}", 'name': name, 'type': msg_type, 'content': content, 'time': datetime.now().strftime("%H:%M"), 'avatar': users[name].get('avatar'), 'timestamp': time.time()}
-    private_chats[chat]['messages'].append(msg)
-    if len(private_chats[chat]['messages']) > 200:
-        private_chats[chat]['messages'] = private_chats[chat]['messages'][-100:]
-    save_data()
-    emit('new_message', {'chat': chat, 'message': msg}, room=chat)
-    for member in private_chats[chat]['users']:
-        if member != name:
-            unread.setdefault(member, {})
-            unread[member][chat] = unread[member].get(chat, 0) + 1
-            total_unread = sum(unread[member].values())
-            if users.get(member, {}).get('sid'):
-                emit('unread_update', {'chat': chat, 'count': unread[member][chat], 'total': total_unread}, room=users[member]['sid'])
-                emit('push_notification', {'from': name, 'content': content[:100] + ('...' if len(content) > 100 else ''), 'chat_id': chat}, room=users[member]['sid'])
+        content = content[:500000]
+    elif msg_type == 'voice':
+        content = content[:200000]
+    
+    msg = {
+        'id': f"m{int(time.time()*1000)}_{random.randint(1000, 9999)}",
+        'name': name,
+        'type': msg_type,
+        'content': content,
+        'time': datetime.now().strftime("%H:%M"),
+        'timestamp': time.time(),
+        'avatar': users[name].get('avatar'),
+        'edited': False,
+        'reactions': {},
+        'replies': [],
+        'reply_to': reply_to,
+        'forwarded_from': forwarded_from,
+        'read_by': [name]
+    }
+    
+    if chat in private_chats:
+        private_chats[chat]['messages'].append(msg)
+        if len(private_chats[chat]['messages']) > 500:
+            private_chats[chat]['messages'] = private_chats[chat]['messages'][-300:]
+        save_data()
+        emit('new_message', {'chat': chat, 'message': msg}, room=chat)
+        
+        for member in private_chats[chat]['users']:
+            if member != name:
+                unread.setdefault(member, {})
+                unread[member][chat] = unread[member].get(chat, 0) + 1
+                total_unread = sum(unread[member].values())
+                if users.get(member, {}).get('sid'):
+                    emit('unread_update', {'chat': chat, 'count': unread[member][chat], 'total': total_unread}, room=users[member]['sid'])
+                    emit('push_notification', {'from': name, 'content': content[:100] + ('...' if len(content) > 100 else ''), 'chat_id': chat, 'msg_id': msg['id']}, room=users[member]['sid'])
+    
+    elif chat in group_chats:
+        if name not in group_chats[chat]['members']:
+            return
+        group_chats[chat]['messages'].append(msg)
+        if len(group_chats[chat]['messages']) > 500:
+            group_chats[chat]['messages'] = group_chats[chat]['messages'][-300:]
+        save_data()
+        emit('new_message', {'chat': chat, 'message': msg}, room=chat)
+        
+        for member in group_chats[chat]['members']:
+            if member != name:
+                unread.setdefault(member, {})
+                unread[member][chat] = unread[member].get(chat, 0) + 1
+                if users.get(member, {}).get('sid'):
+                    emit('push_notification', {'from': name, 'content': content[:100] + ('...' if len(content) > 100 else ''), 'chat_id': chat, 'msg_id': msg['id']}, room=users[member]['sid'])
 
 @socketio.on('join_chat')
 def join_chat(data):
     chat = data.get('chat', '')
     name = data.get('name', '')
-    if name not in users or chat not in private_chats:
+    if name not in users:
         return
+    if chat in private_chats:
+        if name not in private_chats[chat]['users']:
+            return
+    elif chat in group_chats:
+        if name not in group_chats[chat]['members']:
+            return
+    else:
+        return
+    
     join_room(chat)
     if name in unread:
         unread[name][chat] = 0
-    msgs = private_chats.get(chat, {}).get('messages', [])[-100:]
+    
+    msgs = []
+    if chat in private_chats:
+        msgs = private_chats[chat]['messages'][-200:]
+    elif chat in group_chats:
+        msgs = group_chats[chat]['messages'][-200:]
+    
+    # Отметка о прочтении
+    for msg in msgs:
+        if msg['name'] != name and name not in msg.get('read_by', []):
+            msg['read_by'] = msg.get('read_by', []) + [name]
+    save_data()
+    
     emit('chat_history', {'messages': msgs, 'chat': chat})
 
 @socketio.on('typing')
@@ -245,6 +376,8 @@ def typing(data):
     chat = data.get('chat', '')
     name = data.get('name', '')
     is_typing = data.get('typing', False)
+    if is_blocked(name, chat) if chat in private_chats else False:
+        return
     typing_users[chat] = typing_users.get(chat, {})
     if is_typing:
         typing_users[chat][name] = time.time()
@@ -252,31 +385,317 @@ def typing(data):
         typing_users[chat].pop(name, None)
     emit('typing_status', {'name': name, 'typing': is_typing}, room=chat, include_self=False)
 
-@socketio.on('get_users')
-def get_users(data):
+@socketio.on('mark_read')
+def mark_read(data):
+    chat = data.get('chat', '')
     name = data.get('name', '')
-    user_list = []
-    for n, u in users.items():
-        if n != name:
-            user_list.append({'name': n, 'username': u.get('username', n), 'avatar': u.get('avatar'), 'status': u.get('status', 'offline'), 'bio': u.get('bio', ''), 'posts': [p for p in posts if p['author'] == n]})
-    emit('users_list', {'users': user_list})
-
-@socketio.on('start_private_chat')
-def start_private_chat(data):
-    user1 = data.get('user1', '')
-    user2 = data.get('user2', '')
-    if user1 not in users or user2 not in users:
+    msg_id = data.get('msg_id', '')
+    if name not in users:
         return
-    chat_id = f"p_{min(user1, user2)}_{max(user1, user2)}"
-    if chat_id not in private_chats:
-        private_chats[chat_id] = {'users': [user1, user2], 'messages': []}
+    
+    if chat in private_chats:
+        for msg in private_chats[chat]['messages']:
+            if msg['id'] == msg_id and name not in msg.get('read_by', []):
+                msg['read_by'] = msg.get('read_by', []) + [name]
         save_data()
-    join_room(chat_id)
-    if user1 in unread:
-        unread[user1][chat_id] = 0
-    msgs = private_chats[chat_id]['messages'][-100:]
-    emit('private_chat', {'chat_id': chat_id, 'user': user2, 'avatar': users[user2].get('avatar'), 'messages': msgs})
+        emit('read_update', {'chat': chat, 'msg_id': msg_id, 'read_by': msg['read_by']}, room=chat)
 
+# ========== WEBSOCKET: РЕАКЦИИ ==========
+@socketio.on('message_reaction')
+def message_reaction(data):
+    chat = data.get('chat', '')
+    msg_id = data.get('msg_id', '')
+    name = data.get('name', '')
+    reaction = data.get('reaction', '')
+    
+    if name not in users or reaction not in ['❤️', '🔥', '👍', '👎', '😂', '😮', '😡', '🥰', '😱']:
+        return
+    
+    msgs = []
+    if chat in private_chats:
+        msgs = private_chats[chat]['messages']
+    elif chat in group_chats:
+        msgs = group_chats[chat]['messages']
+    else:
+        return
+    
+    for msg in msgs:
+        if msg['id'] == msg_id:
+            if name in msg['reactions'] and msg['reactions'][name] == reaction:
+                del msg['reactions'][name]
+            else:
+                msg['reactions'][name] = reaction
+            save_data()
+            emit('reaction_updated', {'chat': chat, 'msg_id': msg_id, 'reactions': msg['reactions']}, room=chat)
+            break
+
+# ========== WEBSOCKET: РЕПЛАИ ==========
+@socketio.on('reply_message')
+def reply_message(data):
+    chat = data.get('chat', '')
+    msg_id = data.get('msg_id', '')
+    name = data.get('name', '')
+    reply_text = data.get('reply', '')[:500]
+    
+    if name not in users:
+        return
+    
+    # Находим оригинальное сообщение
+    msgs = []
+    if chat in private_chats:
+        msgs = private_chats[chat]['messages']
+    elif chat in group_chats:
+        msgs = group_chats[chat]['messages']
+    else:
+        return
+    
+    original = None
+    for msg in msgs:
+        if msg['id'] == msg_id:
+            original = msg
+            break
+    
+    if not original:
+        return
+    
+    # Отправляем ответ как отдельное сообщение с ссылкой на оригинал
+    reply_msg = {
+        'id': f"m{int(time.time()*1000)}_{random.randint(1000, 9999)}",
+        'name': name,
+        'type': 'text',
+        'content': reply_text,
+        'reply_to': {
+            'id': original['id'],
+            'name': original['name'],
+            'content': original['content'][:100] + ('...' if len(original['content']) > 100 else '')
+        },
+        'time': datetime.now().strftime("%H:%M"),
+        'timestamp': time.time(),
+        'avatar': users[name].get('avatar'),
+        'edited': False,
+        'reactions': {},
+        'replies': [],
+        'read_by': [name]
+    }
+    
+    if chat in private_chats:
+        private_chats[chat]['messages'].append(reply_msg)
+        save_data()
+        emit('new_message', {'chat': chat, 'message': reply_msg}, room=chat)
+    elif chat in group_chats:
+        group_chats[chat]['messages'].append(reply_msg)
+        save_data()
+        emit('new_message', {'chat': chat, 'message': reply_msg}, room=chat)
+# ========== WEBSOCKET: ГРУППОВЫЕ ЧАТЫ ==========
+@socketio.on('create_group')
+def create_group(data):
+    name = data.get('name', '')
+    group_name = data.get('group_name', 'Новая группа')
+    members = data.get('members', [])
+    
+    if name not in users:
+        return
+    if len(members) < 2:
+        emit('error', {'message': 'Нужно минимум 2 участника'})
+        return
+    
+    chat_id = f"g_{int(time.time()*1000)}_{random.randint(1000, 9999)}"
+    group_chats[chat_id] = {
+        'name': group_name,
+        'admin': name,
+        'members': [name] + members,
+        'messages': [],
+        'created_at': time.time(),
+        'avatar': None
+    }
+    save_data()
+    join_room(chat_id)
+    for member in [name] + members:
+        if users.get(member, {}).get('sid'):
+            emit('group_created', {'chat_id': chat_id, 'name': group_name, 'members': [name] + members}, room=users[member]['sid'])
+    emit('private_chat', {'chat_id': chat_id, 'user': group_name, 'avatar': None, 'messages': [], 'is_group': True})
+
+@socketio.on('add_group_member')
+def add_group_member(data):
+    chat = data.get('chat', '')
+    name = data.get('name', '')
+    new_member = data.get('member', '')
+    
+    if chat not in group_chats:
+        return
+    if group_chats[chat]['admin'] != name:
+        emit('error', {'message': 'Только админ может добавлять участников'})
+        return
+    if new_member in group_chats[chat]['members']:
+        return
+    if new_member not in users:
+        emit('error', {'message': 'Пользователь не найден'})
+        return
+    
+    group_chats[chat]['members'].append(new_member)
+    save_data()
+    if users.get(new_member, {}).get('sid'):
+        emit('group_updated', {'chat': chat, 'members': group_chats[chat]['members']}, room=users[new_member]['sid'])
+    emit('group_updated', {'chat': chat, 'members': group_chats[chat]['members']}, room=chat)
+
+@socketio.on('remove_group_member')
+def remove_group_member(data):
+    chat = data.get('chat', '')
+    name = data.get('name', '')
+    remove_user = data.get('user', '')
+    
+    if chat not in group_chats:
+        return
+    if group_chats[chat]['admin'] != name:
+        emit('error', {'message': 'Только админ может удалять участников'})
+        return
+    if remove_user not in group_chats[chat]['members']:
+        return
+    if remove_user == group_chats[chat]['admin']:
+        emit('error', {'message': 'Нельзя удалить админа'})
+        return
+    
+    group_chats[chat]['members'].remove(remove_user)
+    save_data()
+    emit('group_updated', {'chat': chat, 'members': group_chats[chat]['members']}, room=chat)
+
+# ========== WEBSOCKET: СТОРИС ==========
+@socketio.on('create_story')
+def create_story(data):
+    name = data.get('name', '')
+    content = data.get('content', '')
+    media_type = data.get('type', 'image')
+    
+    if name not in users:
+        return
+    
+    story = {
+        'id': f"s{int(time.time()*1000)}_{random.randint(1000, 9999)}",
+        'name': name,
+        'content': content,
+        'type': media_type,
+        'timestamp': time.time(),
+        'views': []
+    }
+    
+    stories.setdefault(name, []).append(story)
+    if len(stories[name]) > 10:
+        stories[name] = stories[name][-10:]
+    save_data()
+    
+    emit('new_story', {'name': name, 'story': story}, broadcast=True)
+    
+    # Автоудаление через 24 часа
+    threading.Timer(86400, lambda: delete_story_after_time(name, story['id'])).start()
+
+def delete_story_after_time(name, story_id):
+    if name in stories:
+        stories[name] = [s for s in stories[name] if s['id'] != story_id]
+        save_data()
+        emit('story_deleted', {'name': name, 'story_id': story_id}, broadcast=True)
+
+@socketio.on('view_story')
+def view_story(data):
+    name = data.get('name', '')
+    story_id = data.get('story_id', '')
+    viewer = data.get('viewer', '')
+    
+    if name in stories:
+        for story in stories[name]:
+            if story['id'] == story_id and viewer not in story['views']:
+                story['views'].append(viewer)
+                save_data()
+                emit('story_viewed', {'name': name, 'story_id': story_id, 'views': story['views']}, broadcast=True)
+                break
+
+# ========== WEBSOCKET: ПОСТЫ ==========
+@socketio.on('create_post')
+def create_post(data):
+    name = data.get('name', '')
+    content = data.get('content', '')
+    media_type = data.get('media_type', 'image')
+    caption = data.get('caption', '')[:500]
+    hashtags = re.findall(r'#(\w+)', caption)
+    
+    if name not in users:
+        return
+    if len(content) > 500000:
+        content = content[:500000]
+    
+    post_id = f"p{int(time.time()*1000)}_{random.randint(1000, 9999)}"
+    posts[post_id] = {
+        'id': post_id,
+        'author': name,
+        'avatar': users[name].get('avatar'),
+        'content': content,
+        'media_type': media_type,
+        'caption': caption,
+        'hashtags': hashtags,
+        'likes': [],
+        'comments': [],
+        'saved_by': [],
+        'reposts': [],
+        'time': datetime.now().strftime("%d.%m.%Y %H:%M"),
+        'timestamp': time.time()
+    }
+    save_data()
+    emit('new_post', {'post': posts[post_id]}, broadcast=True)
+
+@socketio.on('get_posts')
+def get_posts():
+    emit('posts_list', {'posts': list(posts.values())[:50]})
+
+@socketio.on('like_post')
+def like_post(data):
+    post_id = data.get('post_id', '')
+    name = data.get('name', '')
+    if post_id in posts:
+        if name in posts[post_id]['likes']:
+            posts[post_id]['likes'].remove(name)
+        else:
+            posts[post_id]['likes'].append(name)
+        save_data()
+        emit('post_updated', {'post': posts[post_id]}, broadcast=True)
+
+@socketio.on('comment_post')
+def comment_post(data):
+    post_id = data.get('post_id', '')
+    name = data.get('name', '')
+    comment = data.get('comment', '')[:300]
+    if post_id in posts:
+        posts[post_id]['comments'].append({
+            'id': f"c{int(time.time()*1000)}_{random.randint(1000, 9999)}",
+            'name': name,
+            'avatar': users.get(name, {}).get('avatar'),
+            'comment': comment,
+            'time': datetime.now().strftime("%H:%M"),
+            'timestamp': time.time(),
+            'likes': []
+        })
+        save_data()
+        emit('post_updated', {'post': posts[post_id]}, broadcast=True)
+
+@socketio.on('save_post')
+def save_post(data):
+    post_id = data.get('post_id', '')
+    name = data.get('name', '')
+    if post_id in posts:
+        if name in posts[post_id]['saved_by']:
+            posts[post_id]['saved_by'].remove(name)
+        else:
+            posts[post_id]['saved_by'].append(name)
+        save_data()
+        emit('post_updated', {'post': posts[post_id]}, broadcast=True)
+
+@socketio.on('repost_post')
+def repost_post(data):
+    post_id = data.get('post_id', '')
+    name = data.get('name', '')
+    if post_id in posts and name not in posts[post_id]['reposts']:
+        posts[post_id]['reposts'].append(name)
+        save_data()
+        emit('post_updated', {'post': posts[post_id]}, broadcast=True)
+# ========== WEBSOCKET: ПРОФИЛЬ ==========
 @socketio.on('update_avatar')
 def update_avatar(data):
     name = data.get('name', '')
@@ -295,53 +714,165 @@ def update_bio(data):
         save_data()
         emit('bio_updated', {'name': name, 'bio': bio})
 
-@socketio.on('create_post')
-def create_post(data):
+@socketio.on('update_profile')
+def update_profile(data):
     name = data.get('name', '')
-    content = data.get('content', '')
-    media_type = data.get('media_type', 'image')
-    caption = data.get('caption', '')[:500]
+    new_name = data.get('new_name', '').strip()
+    new_username = data.get('new_username', '').strip().lower()
+    
     if name not in users:
         return
-    if len(content) > 500000:
-        content = content[:500000]
-    post = {'id': f"p{len(posts)}_{int(time.time()*1000)}", 'author': name, 'avatar': users[name].get('avatar'), 'content': content, 'media_type': media_type, 'caption': caption, 'likes': [], 'comments': [], 'time': datetime.now().strftime("%d.%m.%Y %H:%M"), 'timestamp': time.time()}
-    posts.insert(0, post)
-    if len(posts) > 50:
-        posts.pop()
-    save_data()
-    emit('new_post', {'post': post}, broadcast=True)
+    
+    if new_name and len(new_name) >= 2 and len(new_name) <= 20:
+        if re.match(r'^[a-zA-Zа-яА-Я0-9_]+$', new_name) and new_name not in users:
+            # Переименовываем пользователя
+            user_data = users.pop(name)
+            users[new_name] = user_data
+            # Обновляем в чатах
+            for chat_id, chat in private_chats.items():
+                if name in chat['users']:
+                    chat['users'] = [new_name if u == name else u for u in chat['users']]
+            for chat_id, chat in group_chats.items():
+                if name in chat['members']:
+                    chat['members'] = [new_name if u == name else u for u in chat['members']]
+                if chat['admin'] == name:
+                    chat['admin'] = new_name
+            save_data()
+            emit('profile_updated', {'old_name': name, 'new_name': new_name}, broadcast=True)
+            return
+    
+    if new_username and len(new_username) >= 3 and len(new_username) <= 20:
+        if re.match(r'^[a-zA-Z0-9_]+$', new_username):
+            for n, u in users.items():
+                if u.get('username') == new_username and n != name:
+                    emit('error', {'message': 'Юзернейм занят'})
+                    return
+            users[name]['username'] = new_username
+            save_data()
+            emit('username_updated', {'name': name, 'username': new_username}, broadcast=True)
 
-@socketio.on('get_posts')
-def get_posts():
-    emit('posts_list', {'posts': posts[:30]})
-
-@socketio.on('like_post')
-def like_post(data):
-    post_id = data.get('post_id', '')
+# ========== WEBSOCKET: БЛОКИРОВКА ==========
+@socketio.on('block_user')
+def block_user(data):
     name = data.get('name', '')
-    for p in posts:
-        if p['id'] == post_id:
-            if name in p['likes']:
-                p['likes'].remove(name)
+    block_name = data.get('block_name', '')
+    if name not in users or block_name not in users:
+        return
+    if block_name not in blocked_users.get(name, []):
+        blocked_users.setdefault(name, []).append(block_name)
+        save_data()
+        emit('user_blocked', {'by': name, 'blocked': block_name}, room=users[block_name].get('sid') if users[block_name].get('sid') else '')
+
+@socketio.on('unblock_user')
+def unblock_user(data):
+    name = data.get('name', '')
+    unblock_name = data.get('unblock_name', '')
+    if name in blocked_users and unblock_name in blocked_users[name]:
+        blocked_users[name].remove(unblock_name)
+        save_data()
+        emit('user_unblocked', {'by': name, 'unblocked': unblock_name}, room=users[unblock_name].get('sid') if users[unblock_name].get('sid') else '')
+
+# ========== WEBSOCKET: ПОИСК ==========
+@socketio.on('search_users')
+def search_users(data):
+    query = data.get('query', '').lower()
+    name = data.get('name', '')
+    
+    results = []
+    for n, u in users.items():
+        if n != name and n not in blocked_users.get(name, []):
+            if query in n.lower() or query in u.get('username', '').lower():
+                results.append({'name': n, 'username': u.get('username', n), 'avatar': u.get('avatar'), 'status': u.get('status', 'offline')})
+    emit('search_results', {'results': results[:20]})
+
+@socketio.on('search_hashtag')
+def search_hashtag(data):
+    tag = data.get('tag', '').lower()
+    results = []
+    for post in list(posts.values()):
+        if tag in [h.lower() for h in post.get('hashtags', [])]:
+            results.append(post)
+    emit('search_results', {'posts': results[:30]})
+
+# ========== WEBSOCKET: УДАЛЕНИЕ И РЕДАКТИРОВАНИЕ ==========
+@socketio.on('delete_message')
+def delete_message(data):
+    chat = data.get('chat', '')
+    msg_id = data.get('msg_id', '')
+    name = data.get('name', '')
+    delete_for_all = data.get('delete_for_all', False)
+    
+    msgs = []
+    if chat in private_chats:
+        msgs = private_chats[chat]['messages']
+    elif chat in group_chats:
+        msgs = group_chats[chat]['messages']
+    else:
+        return
+    
+    for i, m in enumerate(msgs):
+        if m['id'] == msg_id:
+            if m['name'] == name or (chat in group_chats and group_chats[chat]['admin'] == name):
+                if delete_for_all:
+                    del msgs[i]
+                else:
+                    m['content'] = 'Сообщение удалено'
+                    m['deleted'] = True
+                save_data()
+                emit('message_deleted', {'chat': chat, 'msg_id': msg_id, 'delete_for_all': delete_for_all}, room=chat)
+                break
+
+@socketio.on('edit_message')
+def edit_message(data):
+    chat = data.get('chat', '')
+    msg_id = data.get('msg_id', '')
+    name = data.get('name', '')
+    new_content = data.get('content', '')[:5000]
+    
+    msgs = []
+    if chat in private_chats:
+        msgs = private_chats[chat]['messages']
+    elif chat in group_chats:
+        msgs = group_chats[chat]['messages']
+    else:
+        return
+    
+    for m in msgs:
+        if m['id'] == msg_id and m['name'] == name:
+            m['content'] = new_content
+            m['edited'] = True
+            save_data()
+            emit('message_edited', {'chat': chat, 'message': m}, room=chat)
+            break
+
+@socketio.on('pin_message')
+def pin_message(data):
+    chat = data.get('chat', '')
+    msg_id = data.get('msg_id', '')
+    name = data.get('name', '')
+    
+    if chat in group_chats and group_chats[chat]['admin'] != name:
+        return
+    
+    msgs = []
+    if chat in private_chats:
+        msgs = private_chats[chat]['messages']
+    elif chat in group_chats:
+        msgs = group_chats[chat]['messages']
+    else:
+        return
+    
+    for m in msgs:
+        if m['id'] == msg_id:
+            if msg_id in pinned_messages.get(chat, []):
+                pinned_messages[chat].remove(msg_id)
             else:
-                p['likes'].append(name)
+                pinned_messages.setdefault(chat, []).append(msg_id)
             save_data()
-            emit('post_updated', {'post': p}, broadcast=True)
+            emit('message_pinned', {'chat': chat, 'msg_id': msg_id}, room=chat)
             break
 
-@socketio.on('comment_post')
-def comment_post(data):
-    post_id = data.get('post_id', '')
-    name = data.get('name', '')
-    comment = data.get('comment', '')[:300]
-    for p in posts:
-        if p['id'] == post_id:
-            p['comments'].append({'name': name, 'avatar': users.get(name, {}).get('avatar'), 'comment': comment, 'time': datetime.now().strftime("%H:%M")})
-            save_data()
-            emit('post_updated', {'post': p}, broadcast=True)
-            break
-
+# ========== WEBSOCKET: ОСТАЛЬНОЕ ==========
 @socketio.on('logout')
 def logout(data):
     token = data.get('token', '')
@@ -350,44 +881,43 @@ def logout(data):
             user['token'] = ''
             user['status'] = 'offline'
             user['sid'] = ''
+            user_status_history[name] = {'status': 'offline', 'time': time.time()}
             save_data()
-            emit('user_status', {'name': name, 'status': 'offline'}, broadcast=True)
+            emit('user_status', {'name': name, 'status': 'offline', 'last_seen': time.time()}, broadcast=True)
             break
 
-@socketio.on('delete_message')
-def delete_message(data):
-    chat = data.get('chat', '')
-    msg_id = data.get('msg_id', '')
+@socketio.on('get_users')
+def get_users(data):
     name = data.get('name', '')
-    if chat in private_chats:
-        msgs = private_chats[chat]['messages']
-        for i, m in enumerate(msgs):
-            if m['id'] == msg_id and m['name'] == name:
-                msgs.pop(i)
-                save_data()
-                emit('message_deleted', {'chat': chat, 'msg_id': msg_id}, room=chat)
-                break
+    user_list = []
+    for n, u in users.items():
+        if n != name and n not in blocked_users.get(name, []):
+            user_list.append({'name': n, 'username': u.get('username', n), 'avatar': u.get('avatar'), 'status': u.get('status', 'offline'), 'bio': u.get('bio', ''), 'last_seen': u.get('last_seen', 0)})
+    emit('users_list', {'users': user_list})
 
-@socketio.on('edit_message')
-def edit_message(data):
-    chat = data.get('chat', '')
-    msg_id = data.get('msg_id', '')
-    name = data.get('name', '')
-    new_content = data.get('content', '')[:2000]
-    if chat in private_chats:
-        for m in private_chats[chat]['messages']:
-            if m['id'] == msg_id and m['name'] == name:
-                m['content'] = new_content
-                m['edited'] = True
-                save_data()
-                emit('message_edited', {'chat': chat, 'message': m}, room=chat)
-                break
+@socketio.on('start_private_chat')
+def start_private_chat(data):
+    user1 = data.get('user1', '')
+    user2 = data.get('user2', '')
+    if user1 not in users or user2 not in users:
+        return
+    if is_blocked(user1, user2):
+        emit('error', {'message': 'Вы заблокированы или заблокировали пользователя'})
+        return
+    chat_id = f"p_{min(user1, user2)}_{max(user1, user2)}"
+    if chat_id not in private_chats:
+        private_chats[chat_id] = {'users': [user1, user2], 'messages': []}
+        save_data()
+    join_room(chat_id)
+    if user1 in unread:
+        unread[user1][chat_id] = 0
+    msgs = private_chats[chat_id]['messages'][-200:]
+    emit('private_chat', {'chat_id': chat_id, 'user': user2, 'avatar': users[user2].get('avatar'), 'messages': msgs, 'is_group': False})
 
 @socketio.on('share_link')
 def share_link():
     emit('share_link', {'url': request.host})
-
-HTML = '''<!DOCTYPE html>
+HTML='''<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
@@ -457,7 +987,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
 .chat-avatar .online-dot { position: absolute; bottom: 2px; right: 2px; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--bg-secondary); background: #30d158; }
 .chat-avatar .online-dot.offline { background: var(--text-muted); }
 .chat-info { flex: 1; min-width: 0; }
-.chat-name { font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+.chat-name { font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .chat-username { font-size: 11px; color: var(--text-secondary); }
 .chat-last { font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chat-unread { background: var(--primary); color: #000; font-size: 10px; font-weight: 600; min-width: 18px; height: 18px; border-radius: 9px; display: flex; align-items: center; justify-content: center; padding: 0 5px; margin-left: auto; }
@@ -473,13 +1003,18 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
 .msg.self .msg-bubble { background: var(--bubble-self); color: #000; }
 .msg-bubble img { max-width: 180px; border-radius: 8px; display: block; cursor: pointer; }
 .msg-bubble video { max-width: 180px; border-radius: 8px; display: block; max-height: 300px; }
+.msg-bubble audio { width: 150px; height: 30px; }
 .msg-bubble .edited { font-size: 9px; color: var(--text-secondary); opacity: 0.6; margin-left: 4px; }
 .msg.self .msg-bubble .edited { color: rgba(0,0,0,0.5); }
 .msg-time { font-size: 9px; color: var(--text-secondary); text-align: right; margin-top: 2px; padding-right: 2px; }
 .msg.self .msg-time { color: rgba(0,0,0,0.5); }
-.msg-actions { display: flex; gap: 2px; margin-top: 2px; justify-content: flex-end; }
+.msg-actions { display: flex; gap: 2px; margin-top: 2px; justify-content: flex-end; flex-wrap: wrap; }
 .msg-actions button { background: none; border: none; color: var(--text-secondary); font-size: 10px; cursor: pointer; padding: 2px 6px; border-radius: 4px; transition: background 0.2s; }
 .msg-actions button:hover { background: var(--bg-hover); }
+.msg-reactions { display: flex; gap: 3px; flex-wrap: wrap; margin-top: 3px; }
+.msg-reaction { cursor: pointer; background: var(--bg-input); padding: 1px 6px; border-radius: 10px; font-size: 12px; transition: 0.2s; }
+.msg-reaction:hover { background: var(--bg-hover); transform: scale(1.1); }
+.msg-reply-indicator { font-size: 11px; color: var(--text-secondary); padding: 2px 0 2px 12px; border-left: 2px solid var(--primary); margin-bottom: 2px; }
 .typing-indicator { font-size: 11px; color: var(--text-secondary); padding: 2px 16px 6px; font-style: italic; min-height: 20px; opacity: 0; transition: opacity 0.3s; }
 .typing-indicator.show { opacity: 1; }
 .input-bar { display: flex; padding: 6px 10px 8px; background: var(--bg-secondary); border-top: 0.5px solid var(--border); gap: 6px; align-items: center; flex-shrink: 0; }
@@ -491,6 +1026,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
 .send-btn:active { transform: scale(0.9); opacity: 0.8; }
 .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .send-btn svg { width: 18px; height: 18px; fill: none; stroke: #000; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+.record-btn.recording { color: #ff3b30 !important; animation: pulse 0.8s infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 .post-card { background: var(--bg-secondary); margin: 6px 10px; border-radius: var(--radius); overflow: hidden; border: 0.5px solid var(--border); }
 .post-header { display: flex; align-items: center; padding: 8px 12px; gap: 8px; }
 .post-avatar { width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; color: #fff; background: var(--primary-gradient); overflow: hidden; cursor: pointer; }
@@ -501,7 +1038,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
 .post-time { font-size: 10px; color: var(--text-secondary); margin-left: auto; }
 .post-media { width: 100%; max-height: 350px; object-fit: cover; cursor: pointer; background: var(--bg-input); }
 .post-caption { padding: 6px 12px; font-size: 12px; line-height: 1.4; }
-.post-actions { display: flex; padding: 4px 12px 8px; gap: 16px; border-top: 0.5px solid var(--border); }
+.post-actions { display: flex; padding: 4px 12px 8px; gap: 16px; border-top: 0.5px solid var(--border); flex-wrap: wrap; }
 .post-action { background: none; border: none; color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; gap: 4px; font-size: 12px; padding: 2px 6px; border-radius: 6px; transition: all 0.2s; }
 .post-action:hover { color: var(--text); }
 .post-action:active { transform: scale(0.92); }
@@ -510,8 +1047,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
 .post-action .count { font-size: 11px; }
 .post-action svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .post-comments-wrap { max-height: 0; overflow: hidden; transition: max-height 0.3s ease; }
-.post-comments-wrap.open { max-height: 250px; }
-.post-comments { padding: 0 12px 8px; max-height: 210px; overflow-y: auto; }
+.post-comments-wrap.open { max-height: 300px; }
+.post-comments { padding: 0 12px 8px; max-height: 260px; overflow-y: auto; }
 .post-comment { display: flex; gap: 6px; padding: 3px 0; font-size: 11px; border-bottom: 0.5px solid rgba(255,255,255,0.04); }
 .post-comment:last-child { border-bottom: none; }
 .post-comment-avatar { width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 8px; font-weight: 600; color: #fff; background: var(--primary-gradient); overflow: hidden; }
@@ -566,11 +1103,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
 .empty-state p { font-size: 12px; }
 .toast { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); background: var(--bg-secondary); padding: 8px 16px; border-radius: var(--radius-sm); font-size: 12px; z-index: 60; border-left: 3px solid var(--primary); box-shadow: 0 4px 20px rgba(0,0,0,0.6); animation: toastIn 0.3s ease; max-width: 90%; }
 @keyframes toastIn { from { opacity: 0; transform: translateX(-50%) translateY(16px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+.stories-row { display: flex; gap: 10px; padding: 8px 12px; overflow-x: auto; scrollbar-width: none; }
+.stories-row::-webkit-scrollbar { display: none; }
+.story-circle { width: 56px; height: 56px; border-radius: 50%; flex-shrink: 0; padding: 2px; background: var(--primary-gradient); cursor: pointer; }
+.story-circle-inner { width: 100%; height: 100%; border-radius: 50%; overflow: hidden; border: 2px solid var(--bg); }
+.story-circle-inner img { width: 100%; height: 100%; object-fit: cover; }
+.story-circle-inner .story-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; background: var(--bg-input); font-size: 20px; font-weight: 600; color: var(--primary); }
+.story-name { font-size: 10px; color: var(--text-secondary); text-align: center; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 56px; }
 @media (max-width: 480px) { .msg { max-width: 92%; } .msg-bubble img, .msg-bubble video { max-width: 150px; } .push-notification { min-width: unset; width: 92%; } }
 </style>
-</head>
-<body>
-
+<!-- PUSH УВЕДОМЛЕНИЕ -->
 <div class="push-notification" id="pushNotification" onclick="openChatFromPush()">
     <div class="pn-header">
         <div class="pn-avatar" id="pnAvatar"></div>
@@ -582,7 +1124,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
     </div>
 </div>
 
+<!-- APP -->
 <div id="app">
+    <!-- HEADER -->
     <div class="header">
         <div class="header-left">
             <svg class="logo-icon" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
@@ -598,6 +1142,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
         </div>
     </div>
 
+    <!-- СТОРИС (добавляется динамически) -->
+    <div id="storiesRow" class="stories-row" style="display:none;"></div>
+
+    <!-- СТРАНИЦЫ -->
     <div class="page active" id="pageChats"><div id="chatList"></div></div>
     <div class="page" id="pageUsers">
         <div style="padding:6px 10px;position:sticky;top:0;background:var(--bg);z-index:5">
@@ -608,6 +1156,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
     <div class="page" id="pagePosts"><div id="postsList"></div></div>
     <div class="page" id="pageSettings"><div id="settingsContent"></div></div>
 
+    <!-- ЧАТ ОКНО -->
     <div id="chatWindow">
         <div class="header" style="border-bottom:0.5px solid var(--border);flex-shrink:0">
             <button class="btn-icon" onclick="closeChat()">
@@ -624,6 +1173,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
             <button class="btn-icon" onclick="document.getElementById('fileInput').click()">
                 <svg viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="20" rx="2.18"/><line x1="8" y1="2" x2="8" y2="22"/><line x1="16" y1="2" x2="16" y2="22"/><line x1="2" y1="8" x2="22" y2="8"/><line x1="2" y1="16" x2="22" y2="16"/></svg>
             </button>
+            <button class="btn-icon record-btn" id="recordBtn" onclick="toggleRecording()" title="Голосовое сообщение">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
             <input type="text" id="msgInput" placeholder="Сообщение..." onkeypress="if(event.key==='Enter')sendMessage()" oninput="handleTyping()">
             <button class="send-btn" onclick="sendMessage()">
                 <svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
@@ -631,6 +1183,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
         </div>
     </div>
 
+    <!-- НАВИГАЦИЯ -->
     <div class="nav" id="nav" style="display:none">
         <div class="nav-item active" onclick="switchPage('chats')">
             <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
@@ -652,16 +1205,19 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
     </div>
 </div>
 
+<!-- МЕДИА-ПРОСМОТР -->
 <div class="media-viewer" id="mediaViewer">
     <button class="media-close" onclick="closeMedia()">✕</button>
     <img id="mediaImg" style="display:none">
     <video id="mediaVideo" controls style="display:none"></video>
 </div>
 
+<!-- СКРЫТЫЕ INPUTS -->
 <input type="file" id="fileInput" accept="image/*,video/*" style="display:none" onchange="handleFile(event)">
 <input type="file" id="avatarInput" accept="image/*" style="display:none" onchange="handleAvatar(event)">
 <input type="file" id="postInput" accept="image/*,video/*" style="display:none" onchange="handlePost(event)">
 
+<!-- ЛОГИН -->
 <div id="loginScreen">
     <div class="login-card">
         <div id="loginStep1">
@@ -698,36 +1254,71 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
         </div>
     </div>
 </div>
-
+</head>
 <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
 <script>
+// ============================================================
+//  DIRECTME - ПОЛНЫЙ JAVASCRIPT
+// ============================================================
+
 const socket = io();
-let currentUser = null, currentToken = null, currentChat = null, currentChatName = '';
-let currentAvatar = null, currentBio = '', typingTimeout = null, isChatOpen = false;
-let unreadData = {}, privateChats = JSON.parse(localStorage.getItem('private_chats') || '[]');
-let pushData = null, pushTimeout = null;
-let currentPhone = '', currentLoginName = '';
+let currentUser = null;
+let currentToken = null;
+let currentChat = null;
+let currentChatName = '';
+let currentAvatar = null;
+let currentBio = '';
+let currentUsername = '';
+let typingTimeout = null;
+let isChatOpen = false;
+let isRecording = false;
+let mediaRecorder = null;
+let audioChunks = [];
+let unreadData = {};
+let privateChats = JSON.parse(localStorage.getItem('private_chats') || '[]');
+let pushData = null;
+let pushTimeout = null;
+let currentPhone = '';
+let currentLoginName = '';
 
+// ============================================================
+//  DOM ЭЛЕМЕНТЫ
+// ============================================================
 const $ = id => document.getElementById(id);
-const chatList = $('chatList'), usersList = $('usersList'), postsList = $('postsList');
-const settingsContent = $('settingsContent'), totalBadge = $('totalBadge');
-const chatWindow = $('chatWindow'), messagesContainer = $('messagesContainer');
-const chatTitle = $('chatTitle'), msgInput = $('msgInput'), typingIndicator = $('typingIndicator');
+const chatList = $('chatList');
+const usersList = $('usersList');
+const postsList = $('postsList');
+const settingsContent = $('settingsContent');
+const totalBadge = $('totalBadge');
+const chatWindow = $('chatWindow');
+const messagesContainer = $('messagesContainer');
+const chatTitle = $('chatTitle');
+const msgInput = $('msgInput');
+const typingIndicator = $('typingIndicator');
+const storiesRow = $('storiesRow');
 
+// ============================================================
+//  ТЕМА (ЧЕРНО-ЖЕЛТАЯ / СВЕТЛАЯ)
+// ============================================================
 function toggleTheme() {
     document.body.classList.toggle('light');
     const isLight = document.body.classList.contains('light');
-    document.getElementById('themeLabel').textContent = isLight ? 'Светлая' : 'Темная';
+    const themeLabel = document.getElementById('themeLabel');
+    if (themeLabel) themeLabel.textContent = isLight ? 'Светлая' : 'Темная';
     localStorage.setItem('directme_theme', isLight ? 'light' : 'dark');
 }
 
 function loadTheme() {
     if (localStorage.getItem('directme_theme') === 'light') {
         document.body.classList.add('light');
-        document.getElementById('themeLabel').textContent = 'Светлая';
+        const themeLabel = document.getElementById('themeLabel');
+        if (themeLabel) themeLabel.textContent = 'Светлая';
     }
 }
 
+// ============================================================
+//  УВЕДОМЛЕНИЯ (PUSH)
+// ============================================================
 function showPush(from, content, chatId) {
     const el = $('pushNotification');
     const avatar = $('pnAvatar');
@@ -743,53 +1334,92 @@ function showPush(from, content, chatId) {
     pushTimeout = setTimeout(closePush, 5000);
 }
 
-function closePush() { $('pushNotification').classList.remove('show'); pushData = null; }
-
-function openChatFromPush() {
-    if (pushData) { closePush(); openPrivateChat(pushData.chatId, pushData.from); }
+function closePush() {
+    const el = $('pushNotification');
+    if (el) el.classList.remove('show');
+    pushData = null;
 }
 
+function openChatFromPush() {
+    if (pushData) {
+        closePush();
+        openPrivateChat(pushData.chatId, pushData.from);
+    }
+}
+
+// ============================================================
+//  ЛОГИН / РЕГИСТРАЦИЯ
+// ============================================================
 function requestCode() {
-    const phone = document.getElementById('phoneInput').value.trim();
-    if (phone.length < 10) { showNotification('Введите корректный номер'); return; }
+    const phone = $('phoneInput').value.trim();
+    if (phone.length < 10) {
+        showToast('Введите корректный номер');
+        return;
+    }
     socket.emit('register', { phone });
 }
 
 function verifyCode() {
-    const code = document.getElementById('codeInput').value.trim();
-    if (code.length !== 6) { showNotification('Введите 6 цифр'); return; }
+    const code = $('codeInput').value.trim();
+    if (code.length !== 6) {
+        showToast('Введите 6 цифр');
+        return;
+    }
     socket.emit('verify_code', { phone: currentPhone, code });
 }
 
 function registerUser() {
-    const name = document.getElementById('regName').value.trim();
-    const username = document.getElementById('regUsername').value.trim().toLowerCase();
-    const password = document.getElementById('regPassword').value.trim();
-    if (!name || name.length < 2 || name.length > 20) { showNotification('Имя 2-20 символов'); return; }
-    if (!/^[a-zA-Zа-яА-Я0-9_]+$/.test(name)) { showNotification('Недопустимые символы в имени'); return; }
-    if (!username || username.length < 3 || username.length > 20) { showNotification('Юзернейм 3-20 символов'); return; }
-    if (!/^[a-zA-Z0-9_]+$/.test(username)) { showNotification('Юзернейм только латиница'); return; }
-    if (password.length < 4) { showNotification('Пароль минимум 4 символа'); return; }
+    const name = $('regName').value.trim();
+    const username = $('regUsername').value.trim().toLowerCase();
+    const password = $('regPassword').value.trim();
+
+    if (!name || name.length < 2 || name.length > 20) {
+        showToast('Имя 2-20 символов');
+        return;
+    }
+    if (!/^[a-zA-Zа-яА-Я0-9_]+$/.test(name)) {
+        showToast('Недопустимые символы в имени');
+        return;
+    }
+    if (!username || username.length < 3 || username.length > 20) {
+        showToast('Юзернейм 3-20 символов');
+        return;
+    }
+    if (!/^[a-zA-Z0-9_]+$/.test(username)) {
+        showToast('Юзернейм только латиница');
+        return;
+    }
+    if (password.length < 4) {
+        showToast('Пароль минимум 4 символа');
+        return;
+    }
+
     socket.emit('create_user', { phone: currentPhone, name, username, password });
 }
 
 function loginUser() {
-    const password = document.getElementById('loginPassword').value.trim();
-    if (!password) { showNotification('Введите пароль'); return; }
+    const password = $('loginPassword').value.trim();
+    if (!password) {
+        showToast('Введите пароль');
+        return;
+    }
     socket.emit('login', { name: currentLoginName, password });
 }
 
 function backToPhone() {
-    document.getElementById('loginStep2').classList.add('hidden');
-    document.getElementById('loginStep1').classList.remove('hidden');
+    $('loginStep2').classList.add('hidden');
+    $('loginStep1').classList.remove('hidden');
 }
 
 function backToStart() {
-    document.getElementById('loginStep4').classList.add('hidden');
-    document.getElementById('loginStep1').classList.remove('hidden');
+    $('loginStep4').classList.add('hidden');
+    $('loginStep1').classList.remove('hidden');
 }
 
-function showNotification(msg) {
+// ============================================================
+//  TOAST / УВЕДОМЛЕНИЯ
+// ============================================================
+function showToast(msg) {
     const el = document.createElement('div');
     el.className = 'toast';
     el.textContent = msg;
@@ -797,41 +1427,48 @@ function showNotification(msg) {
     setTimeout(() => el.remove(), 2500);
 }
 
+// ============================================================
+//  SOCKET СОБЫТИЯ
+// ============================================================
 socket.on('code_sent', (data) => {
     currentPhone = data.phone;
-    document.getElementById('loginStep1').classList.add('hidden');
-    document.getElementById('loginStep2').classList.remove('hidden');
-    document.getElementById('phoneDisplay').textContent = '+' + data.phone;
-    document.getElementById('codeDisplay').textContent = data.code;
+    $('loginStep1').classList.add('hidden');
+    $('loginStep2').classList.remove('hidden');
+    $('phoneDisplay').textContent = '+' + data.phone;
+    $('codeDisplay').textContent = data.code;
 });
 
 socket.on('user_exists', (data) => {
     currentLoginName = data.name;
-    document.getElementById('loginStep2').classList.add('hidden');
-    document.getElementById('loginStep4').classList.remove('hidden');
-    document.getElementById('loginName').textContent = data.name;
+    $('loginStep2').classList.add('hidden');
+    $('loginStep4').classList.remove('hidden');
+    $('loginName').textContent = data.name;
 });
 
 socket.on('new_user', (data) => {
     currentPhone = data.phone;
-    document.getElementById('loginStep2').classList.add('hidden');
-    document.getElementById('loginStep3').classList.remove('hidden');
+    $('loginStep2').classList.add('hidden');
+    $('loginStep3').classList.remove('hidden');
 });
 
 socket.on('login_success', (data) => {
     currentUser = data.name;
     currentToken = data.token;
     currentAvatar = data.avatar;
+    currentUsername = data.username || data.name;
+    currentBio = data.bio || '';
     localStorage.setItem('directme_token', data.token);
     localStorage.setItem('directme_user', data.name);
     enterApp();
 });
 
-socket.on('error', (data) => { showNotification(data.message); });
+socket.on('error', (data) => {
+    showToast(data.message);
+});
 
 socket.on('push_notification', (data) => {
     showPush(data.from, data.content, data.chat_id);
-    if (document.getElementById('pageUsers').classList.contains('active')) {
+    if ($('pageUsers').classList.contains('active')) {
         switchPage('chats');
     }
 });
@@ -850,43 +1487,59 @@ socket.on('new_message', (data) => {
 
 socket.on('chat_history', (data) => {
     messagesContainer.innerHTML = '';
-    if (data.messages) { data.messages.forEach(m => renderMessage(m)); scrollToBottom(); }
+    if (data.messages) {
+        data.messages.forEach(m => renderMessage(m));
+        scrollToBottom();
+    }
 });
 
 socket.on('typing_status', (data) => {
-    if (data.typing) { typingIndicator.textContent = data.name + ' печатает...'; typingIndicator.classList.add('show'); }
-    else { typingIndicator.classList.remove('show'); }
+    if (data.typing) {
+        typingIndicator.textContent = data.name + ' печатает...';
+        typingIndicator.classList.add('show');
+    } else {
+        typingIndicator.classList.remove('show');
+    }
 });
 
-socket.on('users_list', (data) => { renderUsersList(data.users); });
+socket.on('users_list', (data) => {
+    renderUsersList(data.users);
+});
 
 socket.on('private_chat', (data) => {
     openPrivateChat(data.chat_id, data.user, data.avatar, data.messages);
 });
 
 socket.on('avatar_updated', (data) => {
-    if (data.name === currentUser) { currentAvatar = data.avatar; }
-    renderChats(); renderUsers();
+    if (data.name === currentUser) currentAvatar = data.avatar;
+    renderChats();
+    renderUsers();
 });
 
 socket.on('bio_updated', (data) => {
-    if (data.name === currentUser) { currentBio = data.bio; renderSettings(); }
+    if (data.name === currentUser) {
+        currentBio = data.bio;
+        renderSettings();
+    }
 });
 
 socket.on('new_post', (data) => {
-    if (document.getElementById('pagePosts').classList.contains('active')) {
+    if ($('pagePosts').classList.contains('active')) {
         postsList.insertAdjacentHTML('afterbegin', renderPost(data.post));
     }
 });
 
 socket.on('posts_list', (data) => {
-    postsList.innerHTML = data.posts.length ? data.posts.map(p => renderPost(p)).join('') : 
-        '<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg><h3>Нет постов</h3><p>Создайте первый пост!</p></div>';
+    if (!data.posts || !data.posts.length) {
+        postsList.innerHTML = `<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg><h3>Нет постов</h3><p>Создайте первый пост!</p></div>`;
+        return;
+    }
+    postsList.innerHTML = data.posts.map(p => renderPost(p)).join('');
 });
 
 socket.on('post_updated', (data) => {
     const el = document.getElementById('post-' + data.post.id);
-    if (el) { el.outerHTML = renderPost(data.post); }
+    if (el) el.outerHTML = renderPost(data.post);
 });
 
 socket.on('message_deleted', (data) => {
@@ -901,58 +1554,107 @@ socket.on('message_edited', (data) => {
         const el = document.querySelector(`[data-msg-id="${data.message.id}"]`);
         if (el) {
             const bubble = el.querySelector('.msg-bubble');
-            if (bubble) { bubble.innerHTML = data.message.content + '<span class="edited">✎</span>'; }
+            if (bubble) bubble.innerHTML = data.message.content + '<span class="edited">✎</span>';
         }
     }
 });
 
 socket.on('share_link', (data) => {
     const url = 'https://' + data.url;
-    if (navigator.clipboard) { navigator.clipboard.writeText(url).then(() => showNotification('Ссылка скопирована!')); }
-    else { prompt('Ссылка:', url); }
+    if (navigator.clipboard) {
+        navigator.clipboard.writeText(url).then(() => showToast('Ссылка скопирована!'));
+    } else {
+        prompt('Ссылка:', url);
+    }
 });
 
+socket.on('reaction_updated', (data) => {
+    if (data.chat === currentChat) {
+        const el = document.querySelector(`[data-msg-id="${data.msg_id}"]`);
+        if (el) {
+            let reactionsHtml = '';
+            if (data.reactions && Object.keys(data.reactions).length > 0) {
+                const counts = {};
+                for (const [user, emoji] of Object.entries(data.reactions)) {
+                    counts[emoji] = (counts[emoji] || 0) + 1;
+                }
+                reactionsHtml = '<div class="msg-reactions">';
+                for (const [emoji, count] of Object.entries(counts)) {
+                    reactionsHtml += `<span class="msg-reaction" onclick="toggleReaction('${data.msg_id}','${emoji}')">${emoji} ${count}</span>`;
+                }
+                reactionsHtml += '</div>';
+            }
+            const existing = el.querySelector('.msg-reactions');
+            if (existing) existing.remove();
+            if (reactionsHtml) {
+                const bubble = el.querySelector('.msg-bubble');
+                if (bubble) bubble.insertAdjacentHTML('afterend', reactionsHtml);
+            }
+        }
+    }
+});
+
+// ============================================================
+//  ЗАПУСК ПРИЛОЖЕНИЯ
+// ============================================================
 function enterApp() {
-    document.getElementById('loginScreen').classList.add('hidden');
-    document.getElementById('nav').style.display = 'flex';
+    $('loginScreen').classList.add('hidden');
+    $('nav').style.display = 'flex';
     loadTheme();
     renderChats();
     renderUsers();
     renderSettings();
     socket.emit('get_posts');
     setInterval(() => socket.emit('get_users', { name: currentUser }), 30000);
+    setInterval(() => socket.emit('get_posts'), 60000);
 }
 
+// ============================================================
+//  НАВИГАЦИЯ
+// ============================================================
 function switchPage(page) {
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+
     if (page === 'chats') {
-        document.getElementById('pageChats').classList.add('active');
+        $('pageChats').classList.add('active');
         document.querySelector('.nav-item:nth-child(1)').classList.add('active');
         renderChats();
-        document.getElementById('headerFab').style.display = 'none';
+        $('headerFab').style.display = 'none';
+        storiesRow.style.display = 'flex';
     } else if (page === 'users') {
-        document.getElementById('pageUsers').classList.add('active');
+        $('pageUsers').classList.add('active');
         document.querySelector('.nav-item:nth-child(2)').classList.add('active');
         socket.emit('get_users', { name: currentUser });
-        document.getElementById('headerFab').style.display = 'none';
+        $('headerFab').style.display = 'none';
+        storiesRow.style.display = 'none';
     } else if (page === 'posts') {
-        document.getElementById('pagePosts').classList.add('active');
+        $('pagePosts').classList.add('active');
         document.querySelector('.nav-item:nth-child(3)').classList.add('active');
         socket.emit('get_posts');
-        document.getElementById('headerFab').style.display = 'flex';
+        $('headerFab').style.display = 'flex';
+        storiesRow.style.display = 'none';
     } else {
-        document.getElementById('pageSettings').classList.add('active');
+        $('pageSettings').classList.add('active');
         document.querySelector('.nav-item:nth-child(4)').classList.add('active');
         renderSettings();
-        document.getElementById('headerFab').style.display = 'none';
+        $('headerFab').style.display = 'none';
+        storiesRow.style.display = 'none';
     }
-    if (isChatOpen) { chatWindow.classList.remove('open'); chatWindow.style.display = 'none'; isChatOpen = false; }
+
+    if (isChatOpen) {
+        chatWindow.classList.remove('open');
+        chatWindow.style.display = 'none';
+        isChatOpen = false;
+    }
 }
 
+// ============================================================
+//  ЧАТЫ
+// ============================================================
 function renderChats() {
     if (!privateChats.length) {
-        chatList.innerHTML = '<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><h3>Нет чатов</h3><p>Найдите людей в разделе "Люди"</p></div>';
+        chatList.innerHTML = `<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><h3>Нет чатов</h3><p>Найдите людей в разделе "Люди"</p></div>`;
         return;
     }
     let html = '';
@@ -962,8 +1664,14 @@ function renderChats() {
         const username = users[c.name]?.username || c.name;
         html += `
             <div class="chat-item" onclick="openPrivateChat('${c.id}', '${c.name}')">
-                <div class="chat-avatar">${c.avatar ? `<img src="${c.avatar}">` : c.name[0]}<span class="online-dot ${c.status === 'online' ? '' : 'offline'}"></span></div>
-                <div class="chat-info"><div class="chat-name">${c.name} <span class="chat-username">@${username}</span></div><div class="chat-last">${lastMsg}</div></div>
+                <div class="chat-avatar">
+                    ${c.avatar ? `<img src="${c.avatar}">` : c.name[0]}
+                    <span class="online-dot ${c.status === 'online' ? '' : 'offline'}"></span>
+                </div>
+                <div class="chat-info">
+                    <div class="chat-name">${c.name} <span class="chat-username">@${username}</span></div>
+                    <div class="chat-last">${lastMsg}</div>
+                </div>
                 ${ur ? `<div class="chat-unread">${ur}</div>` : ''}
             </div>
         `;
@@ -972,17 +1680,25 @@ function renderChats() {
     updateBadge();
 }
 
-function renderUsers() { socket.emit('get_users', { name: currentUser }); }
+function renderUsers() {
+    socket.emit('get_users', { name: currentUser });
+}
 
 function renderUsersList(users) {
     if (!users || !users.length) {
-        usersList.innerHTML = '<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg><h3>Нет пользователей</h3></div>';
+        usersList.innerHTML = `<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg><h3>Нет пользователей</h3></div>`;
         return;
     }
     usersList.innerHTML = users.map(u => `
         <div class="chat-item" onclick="viewProfile('${u.name}')">
-            <div class="chat-avatar">${u.avatar ? `<img src="${u.avatar}">` : u.name[0]}<span class="online-dot ${u.status === 'online' ? '' : 'offline'}"></span></div>
-            <div class="chat-info"><div class="chat-name">${u.name} <span class="chat-username">@${u.username}</span></div><div class="chat-last">${u.bio || 'Привет!'}</div></div>
+            <div class="chat-avatar">
+                ${u.avatar ? `<img src="${u.avatar}">` : u.name[0]}
+                <span class="online-dot ${u.status === 'online' ? '' : 'offline'}"></span>
+            </div>
+            <div class="chat-info">
+                <div class="chat-name">${u.name} <span class="chat-username">@${u.username}</span></div>
+                <div class="chat-last">${u.bio || 'Привет!'}</div>
+            </div>
             <button onclick="event.stopPropagation();startPrivateChat('${u.name}')" class="btn-icon" style="color:var(--primary)">
                 <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             </button>
@@ -991,7 +1707,7 @@ function renderUsersList(users) {
 }
 
 function searchUsers() {
-    const query = document.getElementById('searchUsers').value.toLowerCase().trim();
+    const query = $('searchUsers').value.toLowerCase().trim();
     document.querySelectorAll('#usersList .chat-item').forEach(el => {
         const name = el.querySelector('.chat-name')?.textContent?.toLowerCase() || '';
         const username = el.querySelector('.chat-username')?.textContent?.toLowerCase() || '';
@@ -1005,7 +1721,8 @@ function viewProfile(name) {
     if (name === currentUser) { switchPage('settings'); return; }
     const user = Object.values(users).find(u => u.name === name);
     if (!user) return;
-    const userPosts = posts.filter(p => p.author === name);
+    socket.emit('get_posts');
+    const userPosts = Object.values(posts).filter(p => p.author === name);
     const html = `
         <div style="padding:12px;">
             <div class="profile-section">
@@ -1013,7 +1730,7 @@ function viewProfile(name) {
                 <div class="profile-name">${name}</div>
                 <div class="profile-username">@${user.username || name}</div>
                 <div class="profile-bio">${user.bio || 'Нет описания'}</div>
-                <div class="profile-status">${user.status === 'online' ? 'В сети' : 'Не в сети'}</div>
+                <div class="profile-status">${user.status === 'online' ? '🟢 В сети' : '⚪ Не в сети'}</div>
                 <button class="form-btn" style="margin-top:12px;width:auto;padding:8px 24px;" onclick="startPrivateChat('${name}')">Написать</button>
                 <button class="form-link" onclick="closeProfile()">← Назад</button>
             </div>
@@ -1023,19 +1740,20 @@ function viewProfile(name) {
             </div>
         </div>
     `;
-    const chatPage = document.getElementById('pageChats');
-    chatPage.innerHTML = html;
-    chatPage.classList.add('active');
+    $('pageChats').innerHTML = html;
+    $('pageChats').classList.add('active');
     document.querySelectorAll('.page').forEach(p => { if(p.id !== 'pageChats') p.classList.remove('active'); });
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector('.nav-item:nth-child(1)').classList.add('active');
-    document.getElementById('headerFab').style.display = 'none';
+    $('headerFab').style.display = 'none';
+    storiesRow.style.display = 'none';
 }
 
 function closeProfile() {
-    document.getElementById('pageChats').innerHTML = '<div id="chatList"></div>';
+    $('pageChats').innerHTML = '<div id="chatList"></div>';
     renderChats();
-    document.getElementById('pageChats').classList.add('active');
+    $('pageChats').classList.add('active');
+    storiesRow.style.display = 'flex';
 }
 
 function startPrivateChat(name) {
@@ -1047,30 +1765,39 @@ function openPrivateChat(chatId, name, avatar, messages) {
     currentChat = chatId;
     currentChatName = name;
     isChatOpen = true;
+
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     chatWindow.classList.add('open');
     chatWindow.style.display = 'flex';
     chatTitle.textContent = name;
     messagesContainer.innerHTML = '';
-    if (messages) { messages.forEach(m => renderMessage(m)); scrollToBottom(); }
+
+    if (messages) {
+        messages.forEach(m => renderMessage(m));
+        scrollToBottom();
+    }
+
     const exists = privateChats.some(c => c.id === chatId);
     if (!exists) {
         privateChats.push({ id: chatId, name, avatar: avatar || name[0], lastMsg: '' });
         localStorage.setItem('private_chats', JSON.stringify(privateChats));
     }
+
     if (unreadData[chatId]) { unreadData[chatId] = 0; updateBadge(); }
     socket.emit('join_chat', { chat: chatId, name: currentUser });
     msgInput.focus();
     renderChats();
+    storiesRow.style.display = 'none';
 }
 
 function closeChat() {
     chatWindow.classList.remove('open');
     chatWindow.style.display = 'none';
     isChatOpen = false;
-    document.getElementById('pageChats').classList.add('active');
+    $('pageChats').classList.add('active');
     document.querySelector('.nav-item:nth-child(1)').classList.add('active');
     renderChats();
+    storiesRow.style.display = 'flex';
 }
 
 function deleteChat() {
@@ -1093,7 +1820,9 @@ function sendMessage() {
 function handleTyping() {
     if (typingTimeout) clearTimeout(typingTimeout);
     socket.emit('typing', { chat: currentChat, name: currentUser, typing: true });
-    typingTimeout = setTimeout(() => socket.emit('typing', { chat: currentChat, name: currentUser, typing: false }), 1500);
+    typingTimeout = setTimeout(() => {
+        socket.emit('typing', { chat: currentChat, name: currentUser, typing: false });
+    }, 1500);
 }
 
 function renderMessage(msg) {
@@ -1101,21 +1830,67 @@ function renderMessage(msg) {
     const div = document.createElement('div');
     div.className = 'msg' + (isSelf ? ' self' : '');
     div.dataset.msgId = msg.id;
+
     let content = msg.content;
-    if (msg.type === 'image') content = `<img src="${msg.content}" onclick="openMedia('${msg.content}','image')">`;
-    else if (msg.type === 'video') content = `<video src="${msg.content}" controls></video>`;
-    else content = msg.content.replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    if (msg.type === 'image') {
+        content = `<img src="${msg.content}" onclick="openMedia('${msg.content}','image')">`;
+    } else if (msg.type === 'video') {
+        content = `<video src="${msg.content}" controls></video>`;
+    } else if (msg.type === 'voice') {
+        content = `<audio src="${msg.content}" controls></audio>`;
+    } else {
+        content = msg.content.replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        // Хештеги и упоминания
+        content = content.replace(/#(\w+)/g, '<span style="color:var(--primary-light);cursor:pointer;" onclick="searchHashtag(\'$1\')">#$1</span>');
+        content = content.replace(/@(\w+)/g, '<span style="color:var(--primary);cursor:pointer;" onclick="viewProfile(\'$1\')">@$1</span>');
+    }
+
     const avatar = msg.avatar ? `<img src="${msg.avatar}">` : msg.name[0];
     const actions = isSelf ? `
         <div class="msg-actions">
             <button onclick="editMessage('${msg.id}')">✎</button>
             <button onclick="deleteMessage('${msg.id}')">✕</button>
+            <button onclick="pinMessage('${msg.id}')">📌</button>
         </div>
-    ` : '';
+    ` : `
+        <div class="msg-actions">
+            <button onclick="replyToMessage('${msg.id}','${msg.name}','${msg.content.replace(/'/g, "\\'")}')">↩</button>
+            <button onclick="forwardMessage('${msg.id}')">➡</button>
+        </div>
+    `;
+
+    // Реплай индикатор
+    let replyHtml = '';
+    if (msg.reply_to) {
+        replyHtml = `<div class="msg-reply-indicator">↳ ${msg.reply_to.name}: ${msg.reply_to.content}</div>`;
+    }
+
+    // Реакции
+    let reactionsHtml = '';
+    if (msg.reactions && Object.keys(msg.reactions).length > 0) {
+        const counts = {};
+        for (const [user, emoji] of Object.entries(msg.reactions)) {
+            counts[emoji] = (counts[emoji] || 0) + 1;
+        }
+        reactionsHtml = '<div class="msg-reactions">';
+        for (const [emoji, count] of Object.entries(counts)) {
+            reactionsHtml += `<span class="msg-reaction" onclick="toggleReaction('${msg.id}','${emoji}')">${emoji} ${count}</span>`;
+        }
+        reactionsHtml += '</div>';
+    }
+
+    // Кнопки реакций
+    const reactionBtns = ['❤️', '🔥', '👍', '😂', '😮'].map(e =>
+        `<span onclick="addReaction('${msg.id}','${e}')" style="cursor:pointer;padding:0 3px;font-size:13px;">${e}</span>`
+    ).join('');
+
     div.innerHTML = `
         <div class="msg-avatar">${avatar}</div>
         <div>
+            ${replyHtml}
             <div class="msg-bubble">${content}${msg.edited ? '<span class="edited">✎</span>' : ''}</div>
+            <div style="display:flex;gap:4px;margin-top:2px;flex-wrap:wrap;">${reactionBtns}</div>
+            ${reactionsHtml}
             <div class="msg-time">${msg.time}</div>
             ${actions}
         </div>
@@ -1130,29 +1905,115 @@ function deleteMessage(msgId) {
 
 function editMessage(msgId) {
     const newText = prompt('Редактировать:');
-    if (newText?.trim()) socket.emit('edit_message', { chat: currentChat, msg_id: msgId, name: currentUser, content: newText.trim() });
+    if (newText?.trim()) {
+        socket.emit('edit_message', { chat: currentChat, msg_id: msgId, name: currentUser, content: newText.trim() });
+    }
 }
 
-function scrollToBottom() { setTimeout(() => messagesContainer.scrollTop = messagesContainer.scrollHeight, 50); }
+function pinMessage(msgId) {
+    socket.emit('pin_message', { chat: currentChat, msg_id: msgId, name: currentUser });
+}
+
+function replyToMessage(msgId, name, content) {
+    const replyText = prompt('Ответ на сообщение от ' + name + ': ' + content);
+    if (replyText?.trim()) {
+        socket.emit('reply_message', { chat: currentChat, msg_id: msgId, name: currentUser, reply: replyText.trim() });
+    }
+}
+
+function forwardMessage(msgId) {
+    const target = prompt('Введите имя пользователя для пересылки:');
+    if (target && target.trim() && target !== currentUser) {
+        socket.emit('forward_message', { chat: currentChat, msg_id: msgId, from: currentUser, to: target.trim() });
+    }
+}
+
+function addReaction(msgId, reaction) {
+    socket.emit('message_reaction', { chat: currentChat, msg_id: msgId, name: currentUser, reaction });
+}
+
+function toggleReaction(msgId, reaction) {
+    socket.emit('message_reaction', { chat: currentChat, msg_id: msgId, name: currentUser, reaction });
+}
+
+function scrollToBottom() {
+    setTimeout(() => messagesContainer.scrollTop = messagesContainer.scrollHeight, 50);
+}
 
 function updateBadge() {
     const total = Object.values(unreadData).reduce((a,b) => a + b, 0);
-    if (total > 0) { totalBadge.textContent = total; totalBadge.style.display = 'flex'; }
-    else { totalBadge.style.display = 'none'; }
+    if (total > 0) {
+        totalBadge.textContent = total;
+        totalBadge.style.display = 'flex';
+    } else {
+        totalBadge.style.display = 'none';
+    }
 }
 
+// ============================================================
+//  ГОЛОСОВЫЕ СООБЩЕНИЯ
+// ============================================================
+function toggleRecording() {
+    if (isRecording) {
+        if (mediaRecorder) mediaRecorder.stop();
+        isRecording = false;
+        $('recordBtn').classList.remove('recording');
+        return;
+    }
+    if (!currentChat) { showToast('Откройте чат'); return; }
+    navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(stream => {
+            mediaRecorder = new MediaRecorder(stream);
+            audioChunks = [];
+            mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+            mediaRecorder.onstop = () => {
+                const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                const reader = new FileReader();
+                reader.onload = () => {
+                    socket.emit('send_message', { name: currentUser, chat: currentChat, type: 'voice', content: reader.result });
+                };
+                reader.readAsDataURL(audioBlob);
+                audioChunks = [];
+                stream.getTracks().forEach(t => t.stop());
+            };
+            mediaRecorder.start();
+            isRecording = true;
+            $('recordBtn').classList.add('recording');
+            showToast('⏺ Запись... 30 сек');
+            setTimeout(() => {
+                if (isRecording && mediaRecorder) {
+                    mediaRecorder.stop();
+                    isRecording = false;
+                    $('recordBtn').classList.remove('recording');
+                }
+            }, 30000);
+        })
+        .catch(() => showToast('Нет доступа к микрофону'));
+}
+
+// ============================================================
+//  ФАЙЛЫ (ИЗОБРАЖЕНИЯ, ВИДЕО)
+// ============================================================
 function handleFile(e) {
     const file = e.target.files[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (ev) => {
-        socket.emit('send_message', { name: currentUser, chat: currentChat, type: file.type.startsWith('video') ? 'video' : 'image', content: ev.target.result });
+        socket.emit('send_message', {
+            name: currentUser,
+            chat: currentChat,
+            type: file.type.startsWith('video') ? 'video' : 'image',
+            content: ev.target.result
+        });
     };
     reader.readAsDataURL(file);
     e.target.value = '';
 }
 
-function createPost() { document.getElementById('postInput').click(); }
+// ============================================================
+//  ПОСТЫ
+// ============================================================
+function createPost() { $('postInput').click(); }
 
 function handlePost(e) {
     const file = e.target.files[0];
@@ -1160,8 +2021,13 @@ function handlePost(e) {
     const caption = prompt('Описание:') || '';
     const reader = new FileReader();
     reader.onload = (ev) => {
-        socket.emit('create_post', { name: currentUser, content: ev.target.result, media_type: file.type.startsWith('video') ? 'video' : 'image', caption });
-        showNotification('Пост опубликован!');
+        socket.emit('create_post', {
+            name: currentUser,
+            content: ev.target.result,
+            media_type: file.type.startsWith('video') ? 'video' : 'image',
+            caption: caption
+        });
+        showToast('Пост опубликован!');
     };
     reader.readAsDataURL(file);
     e.target.value = '';
@@ -1169,22 +2035,27 @@ function handlePost(e) {
 
 function renderPost(p) {
     const isLiked = p.likes?.includes(currentUser);
+    const isSaved = p.saved_by?.includes(currentUser);
+    const isReposted = p.reposts?.includes(currentUser);
     const isAuthor = p.author === currentUser;
     const avatar = p.avatar ? `<img src="${p.avatar}">` : p.author[0];
     const comments = p.comments || [];
     const hasComments = comments.length > 0;
     const username = users[p.author]?.username || p.author;
+
     return `
         <div class="post-card" id="post-${p.id}">
             <div class="post-header">
                 <div class="post-avatar" onclick="viewProfile('${p.author}')">${avatar}</div>
-                <div><div class="post-author" onclick="viewProfile('${p.author}')">${p.author} <span class="post-username">@${username}</span></div></div>
+                <div>
+                    <div class="post-author" onclick="viewProfile('${p.author}')">${p.author} <span class="post-username">@${username}</span></div>
+                </div>
                 <div class="post-time">${p.time}</div>
                 ${isAuthor ? `<button class="btn-icon" onclick="deletePost('${p.id}')" style="margin-left:auto;color:#ff3b30"><svg viewBox="0 0 24 24" width="16" height="16"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>` : ''}
             </div>
             ${p.media_type === 'image' ? `<img class="post-media" src="${p.content}" onclick="openMedia('${p.content}','image')">` : ''}
             ${p.media_type === 'video' ? `<video class="post-media" src="${p.content}" controls></video>` : ''}
-            <div class="post-caption">${p.caption || ''}</div>
+            <div class="post-caption">${p.caption ? p.caption.replace(/#(\w+)/g, '<span style="color:var(--primary-light);cursor:pointer;" onclick="searchHashtag(\'$1\')">#$1</span>') : ''}</div>
             <div class="post-actions">
                 <button class="post-action ${isLiked ? 'liked' : ''}" onclick="likePost('${p.id}')">
                     <svg viewBox="0 0 24 24"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
@@ -1193,6 +2064,13 @@ function renderPost(p) {
                 <button class="post-action" onclick="toggleComments('${p.id}')">
                     <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
                     <span class="count">${comments.length}</span>
+                </button>
+                <button class="post-action ${isSaved ? 'liked' : ''}" onclick="savePost('${p.id}')" style="color:${isSaved ? 'var(--primary)' : ''}">
+                    <svg viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+                </button>
+                <button class="post-action ${isReposted ? 'liked' : ''}" onclick="repostPost('${p.id}')" style="color:${isReposted ? 'var(--primary)' : ''}">
+                    <svg viewBox="0 0 24 24"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+                    <span class="count">${(p.reposts || []).length}</span>
                 </button>
             </div>
             <div class="post-comments-wrap ${hasComments ? 'open' : ''}" id="comments-wrap-${p.id}">
@@ -1218,7 +2096,17 @@ function toggleComments(postId) {
     if (wrap) wrap.classList.toggle('open');
 }
 
-function likePost(postId) { socket.emit('like_post', { post_id: postId, name: currentUser }); }
+function likePost(postId) {
+    socket.emit('like_post', { post_id: postId, name: currentUser });
+}
+
+function savePost(postId) {
+    socket.emit('save_post', { post_id: postId, name: currentUser });
+}
+
+function repostPost(postId) {
+    socket.emit('repost_post', { post_id: postId, name: currentUser });
+}
 
 function sendComment(postId) {
     const input = document.getElementById('comment-' + postId);
@@ -1230,24 +2118,43 @@ function sendComment(postId) {
 
 function deletePost(postId) {
     if (!confirm('Удалить пост?')) return;
-    fetch('/delete_post', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pid: postId, n: currentUser }) });
+    fetch('/delete_post', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pid: postId, n: currentUser })
+    });
     setTimeout(() => socket.emit('get_posts'), 500);
 }
 
+function searchHashtag(tag) {
+    socket.emit('search_hashtag', { tag });
+    switchPage('posts');
+    socket.once('search_results', (data) => {
+        if (data.posts && data.posts.length) {
+            postsList.innerHTML = data.posts.map(p => renderPost(p)).join('');
+        } else {
+            postsList.innerHTML = `<div class="empty-state"><h3>Нет постов с #${tag}</h3></div>`;
+        }
+    });
+}
+
+// ============================================================
+//  НАСТРОЙКИ
+// ============================================================
 function renderSettings() {
     const avatar = currentAvatar ? `<img src="${currentAvatar}">` : (currentUser ? currentUser[0] : '?');
-    const username = users[currentUser]?.username || currentUser;
     settingsContent.innerHTML = `
         <div class="profile-section">
-            <div class="profile-avatar" onclick="document.getElementById('avatarInput').click()">${avatar}</div>
+            <div class="profile-avatar" onclick="$('avatarInput').click()">${avatar}</div>
             <div class="profile-name">${currentUser || 'Гость'}</div>
-            <div class="profile-username">@${username}</div>
+            <div class="profile-username">@${currentUsername || currentUser}</div>
             <div class="profile-bio">${currentBio || 'Нажмите чтобы добавить описание'}</div>
-            <div class="profile-status">В сети</div>
+            <div class="profile-status">🟢 В сети</div>
         </div>
         <div class="settings-group">
-            <div class="setting-item" onclick="toggleTheme()"><span class="setting-label">Тема: <span id="themeLabel">Темная</span></span></div>
+            <div class="setting-item" onclick="toggleTheme()"><span class="setting-label">🌓 Тема: <span id="themeLabel">Темная</span></span></div>
             <div class="setting-item" onclick="editBio()"><span class="setting-label">✏️ Редактировать описание</span></div>
+            <div class="setting-item" onclick="editProfile()"><span class="setting-label">✏️ Редактировать профиль</span></div>
             <div class="setting-item" onclick="shareApp()"><span class="setting-label">🔗 Поделиться</span></div>
             <div class="setting-item" onclick="logout()" style="border-left:3px solid #ff3b30"><span class="setting-label" style="color:#ff3b30">🚪 Выйти</span></div>
         </div>
@@ -1256,14 +2163,34 @@ function renderSettings() {
 
 function editBio() {
     const bio = prompt('Введите описание:', currentBio || '');
-    if (bio !== null) { currentBio = bio; socket.emit('update_bio', { name: currentUser, bio }); renderSettings(); }
+    if (bio !== null) {
+        currentBio = bio;
+        socket.emit('update_bio', { name: currentUser, bio });
+        renderSettings();
+    }
+}
+
+function editProfile() {
+    const newName = prompt('Новое имя (2-20 символов):', currentUser);
+    if (newName && newName.trim() && newName !== currentUser) {
+        socket.emit('update_profile', { name: currentUser, new_name: newName.trim() });
+    }
+    const newUsername = prompt('Новый юзернейм (3-20 символов, латиница):', currentUsername);
+    if (newUsername && newUsername.trim() && newUsername !== currentUsername) {
+        socket.emit('update_profile', { name: currentUser, new_username: newUsername.trim().toLowerCase() });
+    }
 }
 
 function handleAvatar(e) {
     const file = e.target.files[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (ev) => { currentAvatar = ev.target.result; socket.emit('update_avatar', { name: currentUser, avatar: ev.target.result }); renderSettings(); showNotification('Аватар обновлен!'); };
+    reader.onload = (ev) => {
+        currentAvatar = ev.target.result;
+        socket.emit('update_avatar', { name: currentUser, avatar: ev.target.result });
+        renderSettings();
+        showToast('Аватар обновлен!');
+    };
     reader.readAsDataURL(file);
     e.target.value = '';
 }
@@ -1276,44 +2203,60 @@ function logout() {
     location.reload();
 }
 
-function shareApp() { socket.emit('share_link'); }
+function shareApp() {
+    socket.emit('share_link');
+}
 
+// ============================================================
+//  МЕДИА-ПРОСМОТР
+// ============================================================
 function openMedia(src, type) {
-    const viewer = document.getElementById('mediaViewer');
+    const viewer = $('mediaViewer');
     viewer.classList.add('open');
     if (type === 'image') {
-        document.getElementById('mediaImg').src = src;
-        document.getElementById('mediaImg').style.display = 'block';
-        document.getElementById('mediaVideo').style.display = 'none';
+        $('mediaImg').src = src;
+        $('mediaImg').style.display = 'block';
+        $('mediaVideo').style.display = 'none';
+        $('mediaVideo').pause();
     } else {
-        document.getElementById('mediaVideo').src = src;
-        document.getElementById('mediaVideo').style.display = 'block';
-        document.getElementById('mediaImg').style.display = 'none';
-        document.getElementById('mediaVideo').play();
+        $('mediaVideo').src = src;
+        $('mediaVideo').style.display = 'block';
+        $('mediaImg').style.display = 'none';
+        $('mediaVideo').play();
     }
 }
 
 function closeMedia() {
-    document.getElementById('mediaViewer').classList.remove('open');
-    document.getElementById('mediaVideo').pause();
+    $('mediaViewer').classList.remove('open');
+    $('mediaVideo').pause();
 }
 
+// ============================================================
+//  АВТО-ВХОД
+// ============================================================
 const savedToken = localStorage.getItem('directme_token');
 const savedUser = localStorage.getItem('directme_user');
-if (savedToken && savedUser) socket.emit('auto_login', { token: savedToken });
+if (savedToken && savedUser) {
+    socket.emit('auto_login', { token: savedToken });
+}
 
+// ============================================================
+//  КЛАВИАТУРА
+// ============================================================
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
-        if (document.getElementById('mediaViewer').classList.contains('open')) closeMedia();
+        if ($('mediaViewer').classList.contains('open')) closeMedia();
         else if (isChatOpen) closeChat();
     }
 });
 
-console.log('DirectMe загружен!');
+console.log('💬 DirectMe загружен!');
 </script>
 </body>
-</html>'''
-
+</html>
+'''
+<body>
+# ========== ЗАПУСК ==========
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
