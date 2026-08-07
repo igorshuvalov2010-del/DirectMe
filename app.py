@@ -72,7 +72,7 @@ def get_users_api(user, name):
     user_list = []
     for n, u in users.items():
         if n != name:
-            user_list.append({'name': n, 'avatar': u.get('avatar'), 'status': u.get('status', 'offline'), 'bio': u.get('bio', '')})
+            user_list.append({'name': n, 'username': u.get('username', n), 'avatar': u.get('avatar'), 'status': u.get('status', 'offline'), 'bio': u.get('bio', '')})
     return jsonify({'users': user_list})
 
 @app.route('/delete_post', methods=['POST'])
@@ -90,7 +90,7 @@ def delete_post():
 
 @socketio.on('connect')
 def handle_connect():
-    print(f"✅ Клиент подключен: {request.sid}")
+    print(f"Client connected: {request.sid}")
 
 @socketio.on('disconnect')
 def handle_disconnect():
@@ -101,7 +101,6 @@ def handle_disconnect():
             emit('user_status', {'name': name, 'status': 'offline'}, broadcast=True)
             save_data()
             break
-    print(f"❌ Клиент отключен: {request.sid}")
 
 @socketio.on('register')
 def register(data):
@@ -111,7 +110,7 @@ def register(data):
         return
     code = str(random.randint(100000, 999999))
     pending[phone] = {'code': code, 'time': time.time()}
-    print(f"📱 Код для {phone}: {code}")
+    print(f"Code for {phone}: {code}")
     emit('code_sent', {'phone': phone, 'code': code})
 
 @socketio.on('verify_code')
@@ -139,6 +138,7 @@ def verify_code(data):
 def create_user(data):
     phone = data.get('phone', '')
     name = data.get('name', '').strip()
+    username = data.get('username', '').strip().lower()
     password = data.get('password', '')
     if not name or len(name) < 2 or len(name) > 20:
         emit('error', {'message': 'Имя должно быть от 2 до 20 символов'})
@@ -146,18 +146,28 @@ def create_user(data):
     if not re.match(r'^[a-zA-Zа-яА-Я0-9_]+$', name):
         emit('error', {'message': 'Имя содержит недопустимые символы'})
         return
+    if not username or len(username) < 3 or len(username) > 20:
+        emit('error', {'message': 'Юзернейм должен быть от 3 до 20 символов'})
+        return
+    if not re.match(r'^[a-zA-Z0-9_]+$', username):
+        emit('error', {'message': 'Юзернейм только латиница, цифры и _'})
+        return
     if name in users:
         emit('error', {'message': 'Пользователь уже существует'})
         return
+    for u in users.values():
+        if u.get('username') == username:
+            emit('error', {'message': 'Юзернейм уже занят'})
+            return
     if len(password) < 4:
         emit('error', {'message': 'Пароль минимум 4 символа'})
         return
     token = generate_token()
-    users[name] = {'sid': request.sid, 'phone': phone, 'password': hash_pass(password), 'avatar': None, 'status': 'online', 'bio': '', 'token': token, 'last_seen': time.time()}
+    users[name] = {'sid': request.sid, 'phone': phone, 'username': username, 'password': hash_pass(password), 'avatar': None, 'status': 'online', 'bio': '', 'token': token, 'last_seen': time.time()}
     unread[name] = {}
     save_data()
-    emit('login_success', {'name': name, 'token': token, 'avatar': None})
-    emit('user_joined', {'name': name, 'avatar': None, 'status': 'online'}, broadcast=True)
+    emit('login_success', {'name': name, 'username': username, 'token': token, 'avatar': None})
+    emit('user_joined', {'name': name, 'username': username, 'avatar': None, 'status': 'online'}, broadcast=True)
 
 @socketio.on('login')
 def login(data):
@@ -175,8 +185,8 @@ def login(data):
     users[name]['token'] = token
     users[name]['last_seen'] = time.time()
     save_data()
-    emit('login_success', {'name': name, 'token': token, 'avatar': users[name].get('avatar')})
-    emit('user_joined', {'name': name, 'avatar': users[name].get('avatar'), 'status': 'online'}, broadcast=True)
+    emit('login_success', {'name': name, 'username': users[name].get('username', name), 'token': token, 'avatar': users[name].get('avatar')})
+    emit('user_joined', {'name': name, 'username': users[name].get('username', name), 'avatar': users[name].get('avatar'), 'status': 'online'}, broadcast=True)
 
 @socketio.on('auto_login')
 def auto_login(data):
@@ -187,8 +197,8 @@ def auto_login(data):
             user['status'] = 'online'
             user['last_seen'] = time.time()
             save_data()
-            emit('login_success', {'name': name, 'token': token, 'avatar': user.get('avatar')})
-            emit('user_joined', {'name': name, 'avatar': user.get('avatar'), 'status': 'online'}, broadcast=True)
+            emit('login_success', {'name': name, 'username': user.get('username', name), 'token': token, 'avatar': user.get('avatar')})
+            emit('user_joined', {'name': name, 'username': user.get('username', name), 'avatar': user.get('avatar'), 'status': 'online'}, broadcast=True)
             return
 
 @socketio.on('send_message')
@@ -248,7 +258,7 @@ def get_users(data):
     user_list = []
     for n, u in users.items():
         if n != name:
-            user_list.append({'name': n, 'avatar': u.get('avatar'), 'status': u.get('status', 'offline'), 'bio': u.get('bio', '')})
+            user_list.append({'name': n, 'username': u.get('username', n), 'avatar': u.get('avatar'), 'status': u.get('status', 'offline'), 'bio': u.get('bio', ''), 'posts': [p for p in posts if p['author'] == n]})
     emit('users_list', {'users': user_list})
 
 @socketio.on('start_private_chat')
@@ -422,47 +432,47 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--text-muted); border-radius: 3px; }
 #app { width: 100%; max-width: 480px; height: 100vh; height: 100dvh; background: var(--bg); display: flex; flex-direction: column; position: relative; overflow: hidden; }
-.header { background: var(--bg-secondary); padding: 10px 16px; display: flex; align-items: center; justify-content: space-between; border-bottom: 0.5px solid var(--border); flex-shrink: 0; min-height: 52px; z-index: 10; }
-.header-left { display: flex; align-items: center; gap: 10px; }
-.header-left .logo { font-size: 20px; font-weight: 700; background: var(--primary-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
-.header-left .logo-icon { font-size: 22px; }
-.header-title { font-size: 17px; font-weight: 600; }
-.header-right { display: flex; gap: 2px; }
-.btn-icon { background: none; border: none; color: var(--text-secondary); padding: 6px; border-radius: 50%; cursor: pointer; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
+.header { background: var(--bg-secondary); padding: 8px 12px; display: flex; align-items: center; justify-content: space-between; border-bottom: 0.5px solid var(--border); flex-shrink: 0; min-height: 48px; z-index: 10; }
+.header-left { display: flex; align-items: center; gap: 8px; }
+.header-left .logo { font-size: 18px; font-weight: 700; background: var(--primary-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+.header-left .logo-icon { width: 22px; height: 22px; fill: none; stroke: var(--primary); stroke-width: 2; }
+.header-title { font-size: 16px; font-weight: 600; }
+.header-right { display: flex; gap: 2px; align-items: center; }
+.btn-icon { background: none; border: none; color: var(--text-secondary); padding: 4px; border-radius: 50%; cursor: pointer; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
 .btn-icon:hover { background: var(--bg-hover); }
 .btn-icon:active { transform: scale(0.92); }
-.btn-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.btn-icon svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .nav { background: var(--bg-secondary); display: flex; border-top: 0.5px solid var(--border); flex-shrink: 0; padding-bottom: env(safe-area-inset-bottom); }
 .nav-item { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 0 4px; cursor: pointer; color: var(--text-secondary); font-size: 10px; transition: color 0.2s; position: relative; }
 .nav-item.active { color: var(--primary); }
-.nav-item svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.nav-item svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .nav-item .label { font-size: 9px; font-weight: 500; }
 .nav-item .badge { position: absolute; top: 2px; right: 50%; transform: translateX(180%); background: #ff3b30; color: #fff; font-size: 9px; font-weight: 700; min-width: 16px; height: 16px; border-radius: 8px; display: flex; align-items: center; justify-content: center; padding: 0 4px; border: 1.5px solid var(--bg-secondary); }
 .page { flex: 1; overflow-y: auto; overflow-x: hidden; display: none; -webkit-overflow-scrolling: touch; padding-bottom: 4px; }
 .page.active { display: block; }
-.chat-item { display: flex; align-items: center; padding: 10px 16px; gap: 12px; cursor: pointer; transition: background 0.15s; border-bottom: 0.5px solid rgba(255,255,255,0.03); }
+.chat-item { display: flex; align-items: center; padding: 8px 12px; gap: 10px; cursor: pointer; transition: background 0.15s; border-bottom: 0.5px solid rgba(255,255,255,0.03); }
 .chat-item:active { background: var(--bg-hover); }
-.chat-avatar { width: 48px; height: 48px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 600; color: #fff; background: var(--primary-gradient); overflow: hidden; position: relative; }
+.chat-avatar { width: 44px; height: 44px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 600; color: #fff; background: var(--primary-gradient); overflow: hidden; position: relative; }
 .chat-avatar img { width: 100%; height: 100%; object-fit: cover; }
-.chat-avatar .online-dot { position: absolute; bottom: 2px; right: 2px; width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--bg-secondary); background: #30d158; }
+.chat-avatar .online-dot { position: absolute; bottom: 2px; right: 2px; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--bg-secondary); background: #30d158; }
 .chat-avatar .online-dot.offline { background: var(--text-muted); }
 .chat-info { flex: 1; min-width: 0; }
-.chat-name { font-size: 15px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
-.chat-last { font-size: 13px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.chat-time { font-size: 10px; color: var(--text-secondary); flex-shrink: 0; margin-left: 8px; }
+.chat-name { font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+.chat-username { font-size: 11px; color: var(--text-secondary); }
+.chat-last { font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chat-unread { background: var(--primary); color: #000; font-size: 10px; font-weight: 600; min-width: 18px; height: 18px; border-radius: 9px; display: flex; align-items: center; justify-content: center; padding: 0 5px; margin-left: auto; }
 #chatWindow { display: none; flex: 1; flex-direction: column; min-height: 0; background: var(--bg); }
 #chatWindow.open { display: flex; }
 .messages-container { flex: 1; overflow-y: auto; padding: 8px 12px; -webkit-overflow-scrolling: touch; display: flex; flex-direction: column; gap: 2px; }
-.msg { display: flex; gap: 6px; margin-bottom: 2px; max-width: 88%; animation: msgIn 0.25s ease; }
+.msg { display: flex; gap: 6px; margin-bottom: 2px; max-width: 88%; animation: msgIn 0.2s ease; }
 .msg.self { align-self: flex-end; flex-direction: row-reverse; }
-@keyframes msgIn { from { opacity: 0; transform: translateY(8px) scale(0.97); } to { opacity: 1; transform: translateY(0) scale(1); } }
-.msg-avatar { width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; color: #fff; background: var(--primary-gradient); overflow: hidden; margin-top: auto; }
+@keyframes msgIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+.msg-avatar { width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: #fff; background: var(--primary-gradient); overflow: hidden; margin-top: auto; }
 .msg-avatar img { width: 100%; height: 100%; object-fit: cover; }
-.msg-bubble { padding: 8px 14px; border-radius: 16px; font-size: 14px; line-height: 1.45; word-wrap: break-word; background: var(--bubble-other); max-width: 100%; box-shadow: 0 1px 2px rgba(0,0,0,0.2); color: var(--text); }
+.msg-bubble { padding: 6px 12px; border-radius: 14px; font-size: 13px; line-height: 1.4; word-wrap: break-word; background: var(--bubble-other); max-width: 100%; box-shadow: 0 1px 2px rgba(0,0,0,0.2); color: var(--text); }
 .msg.self .msg-bubble { background: var(--bubble-self); color: #000; }
-.msg-bubble img { max-width: 200px; border-radius: 10px; display: block; cursor: pointer; }
-.msg-bubble video { max-width: 200px; border-radius: 10px; display: block; }
+.msg-bubble img { max-width: 180px; border-radius: 8px; display: block; cursor: pointer; }
+.msg-bubble video { max-width: 180px; border-radius: 8px; display: block; max-height: 300px; }
 .msg-bubble .edited { font-size: 9px; color: var(--text-secondary); opacity: 0.6; margin-left: 4px; }
 .msg.self .msg-bubble .edited { color: rgba(0,0,0,0.5); }
 .msg-time { font-size: 9px; color: var(--text-secondary); text-align: right; margin-top: 2px; padding-right: 2px; }
@@ -470,103 +480,100 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
 .msg-actions { display: flex; gap: 2px; margin-top: 2px; justify-content: flex-end; }
 .msg-actions button { background: none; border: none; color: var(--text-secondary); font-size: 10px; cursor: pointer; padding: 2px 6px; border-radius: 4px; transition: background 0.2s; }
 .msg-actions button:hover { background: var(--bg-hover); }
-.typing-indicator { font-size: 12px; color: var(--text-secondary); padding: 2px 16px 6px; font-style: italic; min-height: 22px; opacity: 0; transition: opacity 0.3s; }
+.typing-indicator { font-size: 11px; color: var(--text-secondary); padding: 2px 16px 6px; font-style: italic; min-height: 20px; opacity: 0; transition: opacity 0.3s; }
 .typing-indicator.show { opacity: 1; }
-.input-bar { display: flex; padding: 6px 12px 8px; background: var(--bg-secondary); border-top: 0.5px solid var(--border); gap: 6px; align-items: center; flex-shrink: 0; }
-.input-bar input { flex: 1; padding: 8px 16px; background: var(--bg-input); border: none; border-radius: 20px; color: var(--text); font-size: 14px; outline: none; transition: all 0.2s; }
+.input-bar { display: flex; padding: 6px 10px 8px; background: var(--bg-secondary); border-top: 0.5px solid var(--border); gap: 6px; align-items: center; flex-shrink: 0; }
+.input-bar input { flex: 1; padding: 6px 14px; background: var(--bg-input); border: none; border-radius: 18px; color: var(--text); font-size: 13px; outline: none; transition: all 0.2s; }
 .input-bar input:focus { background: var(--bg-hover); }
 .input-bar input::placeholder { color: var(--text-secondary); }
-.input-bar .btn-icon { width: 34px; height: 34px; }
-.send-btn { background: var(--primary-gradient); color: #000; border: none; width: 34px; height: 34px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s; flex-shrink: 0; }
+.input-bar .btn-icon { width: 30px; height: 30px; }
+.send-btn { background: var(--primary-gradient); color: #000; border: none; width: 32px; height: 32px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s; flex-shrink: 0; }
 .send-btn:active { transform: scale(0.9); opacity: 0.8; }
 .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.send-btn svg { width: 20px; height: 20px; fill: none; stroke: #000; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
-.post-card { background: var(--bg-secondary); margin: 8px 12px; border-radius: var(--radius); overflow: hidden; border: 0.5px solid var(--border); }
-.post-header { display: flex; align-items: center; padding: 10px 14px; gap: 10px; }
-.post-avatar { width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 600; color: #fff; background: var(--primary-gradient); overflow: hidden; }
+.send-btn svg { width: 18px; height: 18px; fill: none; stroke: #000; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+.post-card { background: var(--bg-secondary); margin: 6px 10px; border-radius: var(--radius); overflow: hidden; border: 0.5px solid var(--border); }
+.post-header { display: flex; align-items: center; padding: 8px 12px; gap: 8px; }
+.post-avatar { width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; color: #fff; background: var(--primary-gradient); overflow: hidden; cursor: pointer; }
 .post-avatar img { width: 100%; height: 100%; object-fit: cover; }
-.post-author { font-weight: 500; font-size: 14px; }
-.post-time { font-size: 11px; color: var(--text-secondary); }
-.post-media { width: 100%; max-height: 400px; object-fit: cover; cursor: pointer; }
-.post-caption { padding: 8px 14px; font-size: 13px; line-height: 1.4; }
-.post-actions { display: flex; padding: 6px 14px 10px; gap: 20px; border-top: 0.5px solid var(--border); }
-.post-action { background: none; border: none; color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; gap: 4px; font-size: 13px; padding: 2px 6px; border-radius: 6px; transition: all 0.2s; }
+.post-author { font-weight: 500; font-size: 13px; cursor: pointer; }
+.post-author:hover { text-decoration: underline; }
+.post-username { font-size: 10px; color: var(--text-secondary); margin-left: 4px; }
+.post-time { font-size: 10px; color: var(--text-secondary); margin-left: auto; }
+.post-media { width: 100%; max-height: 350px; object-fit: cover; cursor: pointer; background: var(--bg-input); }
+.post-caption { padding: 6px 12px; font-size: 12px; line-height: 1.4; }
+.post-actions { display: flex; padding: 4px 12px 8px; gap: 16px; border-top: 0.5px solid var(--border); }
+.post-action { background: none; border: none; color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; gap: 4px; font-size: 12px; padding: 2px 6px; border-radius: 6px; transition: all 0.2s; }
 .post-action:hover { color: var(--text); }
 .post-action:active { transform: scale(0.92); }
 .post-action.liked { color: #ff3b30; }
 .post-action.liked svg { fill: #ff3b30; stroke: #ff3b30; }
-.post-action .count { font-size: 12px; }
-.post-action svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.post-comments-wrap { max-height: 0; overflow: hidden; transition: max-height 0.35s ease; }
-.post-comments-wrap.open { max-height: 300px; }
-.post-comments { padding: 0 14px 8px; max-height: 260px; overflow-y: auto; }
-.post-comment { display: flex; gap: 8px; padding: 4px 0; font-size: 12px; border-bottom: 0.5px solid rgba(255,255,255,0.04); }
+.post-action .count { font-size: 11px; }
+.post-action svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.post-comments-wrap { max-height: 0; overflow: hidden; transition: max-height 0.3s ease; }
+.post-comments-wrap.open { max-height: 250px; }
+.post-comments { padding: 0 12px 8px; max-height: 210px; overflow-y: auto; }
+.post-comment { display: flex; gap: 6px; padding: 3px 0; font-size: 11px; border-bottom: 0.5px solid rgba(255,255,255,0.04); }
 .post-comment:last-child { border-bottom: none; }
-.post-comment-avatar { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 600; color: #fff; background: var(--primary-gradient); overflow: hidden; }
+.post-comment-avatar { width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 8px; font-weight: 600; color: #fff; background: var(--primary-gradient); overflow: hidden; }
 .post-comment-avatar img { width: 100%; height: 100%; object-fit: cover; }
 .post-comment-text { line-height: 1.3; }
 .post-comment-text b { margin-right: 4px; }
-.comment-input { display: flex; padding: 6px 14px 10px; gap: 8px; border-top: 0.5px solid var(--border); }
-.comment-input input { flex: 1; background: var(--bg-input); border: none; border-radius: 12px; padding: 6px 12px; color: var(--text); font-size: 12px; outline: none; }
+.comment-input { display: flex; padding: 4px 12px 8px; gap: 6px; border-top: 0.5px solid var(--border); }
+.comment-input input { flex: 1; background: var(--bg-input); border: none; border-radius: 10px; padding: 4px 10px; color: var(--text); font-size: 11px; outline: none; }
 .comment-input input::placeholder { color: var(--text-secondary); }
-.comment-input button { background: var(--primary-gradient); color: #000; border: none; padding: 4px 14px; border-radius: 12px; font-weight: 600; cursor: pointer; font-size: 12px; transition: opacity 0.2s; }
+.comment-input button { background: var(--primary-gradient); color: #000; border: none; padding: 4px 12px; border-radius: 10px; font-weight: 600; cursor: pointer; font-size: 11px; transition: opacity 0.2s; }
 .comment-input button:active { opacity: 0.7; }
-.profile-section { text-align: center; padding: 28px 20px 20px; background: var(--bg-secondary); margin: 12px; border-radius: var(--radius); }
-.profile-avatar { width: 80px; height: 80px; border-radius: 50%; margin: 0 auto 10px; display: flex; align-items: center; justify-content: center; font-size: 32px; font-weight: 600; color: #fff; background: var(--primary-gradient); cursor: pointer; overflow: hidden; border: 3px solid var(--primary); transition: transform 0.2s; }
+.profile-section { text-align: center; padding: 20px 16px; background: var(--bg-secondary); margin: 8px 10px; border-radius: var(--radius); }
+.profile-avatar { width: 72px; height: 72px; border-radius: 50%; margin: 0 auto 8px; display: flex; align-items: center; justify-content: center; font-size: 28px; font-weight: 600; color: #fff; background: var(--primary-gradient); cursor: pointer; overflow: hidden; border: 3px solid var(--primary); transition: transform 0.2s; }
 .profile-avatar:active { transform: scale(0.95); }
 .profile-avatar img { width: 100%; height: 100%; object-fit: cover; }
-.profile-name { font-size: 20px; font-weight: 600; }
-.profile-bio { color: var(--text-secondary); font-size: 13px; margin-top: 4px; }
-.profile-status { font-size: 12px; margin-top: 2px; color: #30d158; }
-.settings-group { padding: 0 12px 12px; }
-.setting-item { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; background: var(--bg-secondary); margin-bottom: 6px; border-radius: var(--radius-sm); cursor: pointer; transition: background 0.15s; }
+.profile-name { font-size: 18px; font-weight: 600; }
+.profile-username { font-size: 13px; color: var(--text-secondary); }
+.profile-bio { color: var(--text-secondary); font-size: 12px; margin-top: 4px; }
+.profile-status { font-size: 11px; margin-top: 2px; color: #30d158; }
+.settings-group { padding: 0 10px 10px; }
+.setting-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; background: var(--bg-secondary); margin-bottom: 4px; border-radius: var(--radius-sm); cursor: pointer; transition: background 0.15s; }
 .setting-item:active { background: var(--bg-hover); }
-.setting-label { font-size: 14px; }
-.setting-value { color: var(--text-secondary); font-size: 13px; }
+.setting-label { font-size: 13px; }
 #loginScreen { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: var(--bg); display: flex; align-items: center; justify-content: center; z-index: 100; }
-.login-card { text-align: center; padding: 32px 24px; width: 90%; max-width: 340px; }
-.login-logo { font-size: 52px; margin-bottom: 12px; }
-.login-card h1 { font-size: 26px; font-weight: 700; background: var(--primary-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
-.login-card p { color: var(--text-secondary); font-size: 13px; margin: 4px 0 20px; }
-.form-input { width: 100%; padding: 12px 16px; background: var(--bg-secondary); border: 1.5px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-size: 14px; margin-bottom: 10px; outline: none; text-align: center; transition: border 0.3s; }
+.login-card { text-align: center; padding: 28px 20px; width: 90%; max-width: 340px; }
+.login-logo { width: 48px; height: 48px; margin: 0 auto 10px; fill: none; stroke: var(--primary); stroke-width: 2; }
+.login-card h1 { font-size: 24px; font-weight: 700; background: var(--primary-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+.login-card p { color: var(--text-secondary); font-size: 12px; margin: 4px 0 16px; }
+.form-input { width: 100%; padding: 10px 14px; background: var(--bg-secondary); border: 1.5px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-size: 13px; margin-bottom: 8px; outline: none; text-align: center; transition: border 0.3s; }
 .form-input:focus { border-color: var(--primary); }
-.form-input.error { border-color: #ff3b30; }
-.form-btn { width: 100%; padding: 12px; background: var(--primary-gradient); color: #000; border: none; border-radius: var(--radius-sm); font-size: 14px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; }
+.form-btn { width: 100%; padding: 10px; background: var(--primary-gradient); color: #000; border: none; border-radius: var(--radius-sm); font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; }
 .form-btn:active { opacity: 0.8; }
-.form-link { background: none; border: none; color: var(--primary); font-size: 13px; cursor: pointer; margin-top: 10px; }
-.code-box { background: var(--bg-input); padding: 12px; border-radius: var(--radius-sm); font-size: 28px; letter-spacing: 10px; font-weight: 600; color: var(--primary); margin: 10px 0; font-family: monospace; }
+.form-link { background: none; border: none; color: var(--primary); font-size: 12px; cursor: pointer; margin-top: 8px; }
+.code-box { background: var(--bg-input); padding: 10px; border-radius: var(--radius-sm); font-size: 24px; letter-spacing: 8px; font-weight: 600; color: var(--primary); margin: 8px 0; font-family: monospace; }
 .hidden { display: none !important; }
 .media-viewer { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.95); z-index: 200; display: none; align-items: center; justify-content: center; padding: 20px; }
 .media-viewer.open { display: flex; }
 .media-viewer img { max-width: 100%; max-height: 80vh; object-fit: contain; }
 .media-viewer video { max-width: 100%; max-height: 80vh; }
 .media-close { position: absolute; top: 16px; right: 16px; width: 40px; height: 40px; border-radius: 50%; background: rgba(255,255,255,0.1); border: none; color: #fff; font-size: 20px; cursor: pointer; }
-.push-notification { position: fixed; top: 60px; left: 50%; transform: translateX(-50%) translateY(-20px); background: var(--bg-secondary); padding: 14px 20px; border-radius: var(--radius); border-left: 4px solid var(--primary); box-shadow: 0 8px 32px rgba(0,0,0,0.6); z-index: 100; max-width: 90%; min-width: 280px; opacity: 0; pointer-events: none; transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1); }
+.push-notification { position: fixed; top: 12px; left: 50%; transform: translateX(-50%) translateY(-20px); background: var(--bg-secondary); padding: 12px 16px; border-radius: var(--radius); border-left: 4px solid var(--primary); box-shadow: 0 8px 32px rgba(0,0,0,0.6); z-index: 100; max-width: 92%; min-width: 260px; opacity: 0; pointer-events: none; transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1); }
 .push-notification.show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
-.push-notification .pn-header { display: flex; align-items: center; gap: 10px; }
-.push-notification .pn-avatar { width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 600; color: #fff; background: var(--primary-gradient); overflow: hidden; flex-shrink: 0; }
+.push-notification .pn-header { display: flex; align-items: center; gap: 8px; }
+.push-notification .pn-avatar { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; color: #fff; background: var(--primary-gradient); overflow: hidden; flex-shrink: 0; }
 .push-notification .pn-avatar img { width: 100%; height: 100%; object-fit: cover; }
-.push-notification .pn-name { font-weight: 600; font-size: 14px; }
-.push-notification .pn-text { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
-.push-notification .pn-close { background: none; border: none; color: var(--text-secondary); font-size: 18px; cursor: pointer; margin-left: auto; padding: 0 4px; }
-.fab { position: fixed; bottom: 80px; right: 16px; width: 52px; height: 52px; border-radius: 16px; background: var(--primary-gradient); color: #fff; border: none; cursor: pointer; z-index: 20; display: none; align-items: center; justify-content: center; box-shadow: 0 4px 20px var(--shadow); transition: all 0.2s; }
-.fab.show { display: flex; }
-.fab:active { transform: scale(0.9); }
-.fab svg { width: 28px; height: 28px; fill: none; stroke: #000; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
-.empty-state { text-align: center; padding: 60px 20px; color: var(--text-secondary); }
-.empty-state .icon { font-size: 48px; margin-bottom: 12px; }
-.empty-state h3 { color: var(--text); margin-bottom: 4px; }
-.empty-state p { font-size: 13px; }
-.toast { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); background: var(--bg-secondary); padding: 10px 20px; border-radius: var(--radius-sm); font-size: 13px; z-index: 60; border-left: 3px solid var(--primary); box-shadow: 0 4px 20px rgba(0,0,0,0.6); animation: toastIn 0.3s ease; max-width: 90%; }
-@keyframes toastIn { from { opacity: 0; transform: translateX(-50%) translateY(20px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
-@media (max-width: 480px) { .msg { max-width: 92%; } .msg-bubble img, .msg-bubble video { max-width: 160px; } .push-notification { min-width: unset; width: 92%; } }
+.push-notification .pn-name { font-weight: 600; font-size: 13px; }
+.push-notification .pn-text { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+.push-notification .pn-close { background: none; border: none; color: var(--text-secondary); font-size: 16px; cursor: pointer; margin-left: auto; padding: 0 4px; }
+.empty-state { text-align: center; padding: 40px 16px; color: var(--text-secondary); }
+.empty-state .icon { width: 48px; height: 48px; margin: 0 auto 8px; fill: none; stroke: var(--text-muted); stroke-width: 1.5; }
+.empty-state h3 { color: var(--text); margin-bottom: 4px; font-size: 15px; }
+.empty-state p { font-size: 12px; }
+.toast { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); background: var(--bg-secondary); padding: 8px 16px; border-radius: var(--radius-sm); font-size: 12px; z-index: 60; border-left: 3px solid var(--primary); box-shadow: 0 4px 20px rgba(0,0,0,0.6); animation: toastIn 0.3s ease; max-width: 90%; }
+@keyframes toastIn { from { opacity: 0; transform: translateX(-50%) translateY(16px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+@media (max-width: 480px) { .msg { max-width: 92%; } .msg-bubble img, .msg-bubble video { max-width: 150px; } .push-notification { min-width: unset; width: 92%; } }
 </style>
 </head>
 <body>
 
 <div class="push-notification" id="pushNotification" onclick="openChatFromPush()">
     <div class="pn-header">
-        <div class="pn-avatar" id="pnAvatar">👤</div>
+        <div class="pn-avatar" id="pnAvatar"></div>
         <div style="flex:1;min-width:0">
             <div class="pn-name" id="pnName">Имя</div>
             <div class="pn-text" id="pnText">Сообщение</div>
@@ -578,10 +585,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
 <div id="app">
     <div class="header">
         <div class="header-left">
-            <span class="logo-icon">💬</span>
+            <svg class="logo-icon" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             <span class="logo" id="headerTitle">DirectMe</span>
         </div>
         <div class="header-right">
+            <button class="btn-icon" onclick="createPost()" id="headerFab">
+                <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
             <button class="btn-icon" onclick="shareApp()">
                 <svg viewBox="0 0 24 24"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
             </button>
@@ -590,8 +600,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
 
     <div class="page active" id="pageChats"><div id="chatList"></div></div>
     <div class="page" id="pageUsers">
-        <div style="padding:8px 12px;position:sticky;top:0;background:var(--bg);z-index:5">
-            <input class="form-input" id="searchUsers" placeholder="🔍 Поиск..." oninput="searchUsers()" style="text-align:left">
+        <div style="padding:6px 10px;position:sticky;top:0;background:var(--bg);z-index:5">
+            <input class="form-input" id="searchUsers" placeholder="Поиск по имени или юзернейму..." oninput="searchUsers()" style="text-align:left;padding:8px 12px;font-size:12px;">
         </div>
         <div id="usersList"></div>
     </div>
@@ -603,7 +613,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
             <button class="btn-icon" onclick="closeChat()">
                 <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
             </button>
-            <span style="font-weight:500;flex:1;font-size:16px" id="chatTitle">Чат</span>
+            <span style="font-weight:500;flex:1;font-size:15px;text-align:center" id="chatTitle">Чат</span>
             <button class="btn-icon" onclick="deleteChat()">
                 <svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
             </button>
@@ -640,10 +650,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
             <span class="label">Настройки</span>
         </div>
     </div>
-
-    <button class="fab" id="fab" onclick="createPost()" style="display:none">
-        <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-    </button>
 </div>
 
 <div class="media-viewer" id="mediaViewer">
@@ -659,14 +665,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
 <div id="loginScreen">
     <div class="login-card">
         <div id="loginStep1">
-            <div class="login-logo">💬</div>
+            <svg class="login-logo" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             <h1>DirectMe</h1>
             <p>Введите номер телефона</p>
             <input class="form-input" id="phoneInput" placeholder="+7 999 123-45-67" type="tel">
             <button class="form-btn" onclick="requestCode()" type="button">Получить код</button>
         </div>
         <div id="loginStep2" class="hidden">
-            <div class="login-logo">💬</div>
+            <svg class="login-logo" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             <h1>Код</h1>
             <p>Отправлен на <span id="phoneDisplay" style="color:var(--primary)"></span></p>
             <div class="code-box" id="codeDisplay">000000</div>
@@ -675,14 +681,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
             <button class="form-link" onclick="backToPhone()">Изменить номер</button>
         </div>
         <div id="loginStep3" class="hidden">
-            <div class="login-logo">💬</div>
+            <svg class="login-logo" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             <h1>Регистрация</h1>
-            <input class="form-input" id="regPassword" placeholder="Пароль (мин. 4)" type="password">
             <input class="form-input" id="regName" placeholder="Имя (2-20 символов)">
+            <input class="form-input" id="regUsername" placeholder="Юзернейм (3-20 символов, латиница)">
+            <input class="form-input" id="regPassword" placeholder="Пароль (мин. 4)" type="password">
             <button class="form-btn" onclick="registerUser()" type="button">Зарегистрироваться</button>
         </div>
         <div id="loginStep4" class="hidden">
-            <div class="login-logo">💬</div>
+            <svg class="login-logo" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             <h1>Вход</h1>
             <p id="loginName" style="color:var(--primary);font-weight:600"></p>
             <input class="form-input" id="loginPassword" placeholder="Пароль" type="password">
@@ -703,11 +710,10 @@ let currentPhone = '', currentLoginName = '';
 
 const $ = id => document.getElementById(id);
 const chatList = $('chatList'), usersList = $('usersList'), postsList = $('postsList');
-const settingsContent = $('settingsContent'), fab = $('fab'), totalBadge = $('totalBadge');
+const settingsContent = $('settingsContent'), totalBadge = $('totalBadge');
 const chatWindow = $('chatWindow'), messagesContainer = $('messagesContainer');
 const chatTitle = $('chatTitle'), msgInput = $('msgInput'), typingIndicator = $('typingIndicator');
 
-// ===== THEME =====
 function toggleTheme() {
     document.body.classList.toggle('light');
     const isLight = document.body.classList.contains('light');
@@ -716,14 +722,12 @@ function toggleTheme() {
 }
 
 function loadTheme() {
-    const savedTheme = localStorage.getItem('directme_theme');
-    if (savedTheme === 'light') {
+    if (localStorage.getItem('directme_theme') === 'light') {
         document.body.classList.add('light');
         document.getElementById('themeLabel').textContent = 'Светлая';
     }
 }
 
-// ===== PUSH =====
 function showPush(from, content, chatId) {
     const el = $('pushNotification');
     const avatar = $('pnAvatar');
@@ -745,33 +749,31 @@ function openChatFromPush() {
     if (pushData) { closePush(); openPrivateChat(pushData.chatId, pushData.from); }
 }
 
-// ===== LOGIN =====
 function requestCode() {
-    console.log('📞 Запрос кода...');
     const phone = document.getElementById('phoneInput').value.trim();
     if (phone.length < 10) { showNotification('Введите корректный номер'); return; }
     socket.emit('register', { phone });
 }
 
 function verifyCode() {
-    console.log('🔐 Проверка кода...');
     const code = document.getElementById('codeInput').value.trim();
     if (code.length !== 6) { showNotification('Введите 6 цифр'); return; }
     socket.emit('verify_code', { phone: currentPhone, code });
 }
 
 function registerUser() {
-    console.log('📝 Регистрация...');
     const name = document.getElementById('regName').value.trim();
+    const username = document.getElementById('regUsername').value.trim().toLowerCase();
     const password = document.getElementById('regPassword').value.trim();
-    if (!name || name.length < 2 || name.length > 20) { showNotification('Имя должно быть 2-20 символов'); return; }
+    if (!name || name.length < 2 || name.length > 20) { showNotification('Имя 2-20 символов'); return; }
     if (!/^[a-zA-Zа-яА-Я0-9_]+$/.test(name)) { showNotification('Недопустимые символы в имени'); return; }
+    if (!username || username.length < 3 || username.length > 20) { showNotification('Юзернейм 3-20 символов'); return; }
+    if (!/^[a-zA-Z0-9_]+$/.test(username)) { showNotification('Юзернейм только латиница'); return; }
     if (password.length < 4) { showNotification('Пароль минимум 4 символа'); return; }
-    socket.emit('create_user', { phone: currentPhone, name, password });
+    socket.emit('create_user', { phone: currentPhone, name, username, password });
 }
 
 function loginUser() {
-    console.log('🔑 Вход...');
     const password = document.getElementById('loginPassword').value.trim();
     if (!password) { showNotification('Введите пароль'); return; }
     socket.emit('login', { name: currentLoginName, password });
@@ -795,9 +797,7 @@ function showNotification(msg) {
     setTimeout(() => el.remove(), 2500);
 }
 
-// ===== SOCKET EVENTS =====
 socket.on('code_sent', (data) => {
-    console.log('✅ Код отправлен:', data.code);
     currentPhone = data.phone;
     document.getElementById('loginStep1').classList.add('hidden');
     document.getElementById('loginStep2').classList.remove('hidden');
@@ -806,7 +806,6 @@ socket.on('code_sent', (data) => {
 });
 
 socket.on('user_exists', (data) => {
-    console.log('👤 Пользователь найден:', data.name);
     currentLoginName = data.name;
     document.getElementById('loginStep2').classList.add('hidden');
     document.getElementById('loginStep4').classList.remove('hidden');
@@ -814,14 +813,12 @@ socket.on('user_exists', (data) => {
 });
 
 socket.on('new_user', (data) => {
-    console.log('🆕 Новый пользователь');
     currentPhone = data.phone;
     document.getElementById('loginStep2').classList.add('hidden');
     document.getElementById('loginStep3').classList.remove('hidden');
 });
 
 socket.on('login_success', (data) => {
-    console.log('✅ Вход выполнен:', data.name);
     currentUser = data.name;
     currentToken = data.token;
     currentAvatar = data.avatar;
@@ -884,7 +881,7 @@ socket.on('new_post', (data) => {
 
 socket.on('posts_list', (data) => {
     postsList.innerHTML = data.posts.length ? data.posts.map(p => renderPost(p)).join('') : 
-        '<div class="empty-state"><div class="icon">📸</div><h3>Нет постов</h3><p>Создайте первый пост!</p></div>';
+        '<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg><h3>Нет постов</h3><p>Создайте первый пост!</p></div>';
 });
 
 socket.on('post_updated', (data) => {
@@ -915,7 +912,6 @@ socket.on('share_link', (data) => {
     else { prompt('Ссылка:', url); }
 });
 
-// ===== APP =====
 function enterApp() {
     document.getElementById('loginScreen').classList.add('hidden');
     document.getElementById('nav').style.display = 'flex';
@@ -934,39 +930,40 @@ function switchPage(page) {
         document.getElementById('pageChats').classList.add('active');
         document.querySelector('.nav-item:nth-child(1)').classList.add('active');
         renderChats();
-        fab.style.display = 'none';
+        document.getElementById('headerFab').style.display = 'none';
     } else if (page === 'users') {
         document.getElementById('pageUsers').classList.add('active');
         document.querySelector('.nav-item:nth-child(2)').classList.add('active');
         socket.emit('get_users', { name: currentUser });
-        fab.style.display = 'none';
+        document.getElementById('headerFab').style.display = 'none';
     } else if (page === 'posts') {
         document.getElementById('pagePosts').classList.add('active');
         document.querySelector('.nav-item:nth-child(3)').classList.add('active');
         socket.emit('get_posts');
-        fab.style.display = 'flex';
+        document.getElementById('headerFab').style.display = 'flex';
     } else {
         document.getElementById('pageSettings').classList.add('active');
         document.querySelector('.nav-item:nth-child(4)').classList.add('active');
         renderSettings();
-        fab.style.display = 'none';
+        document.getElementById('headerFab').style.display = 'none';
     }
     if (isChatOpen) { chatWindow.classList.remove('open'); chatWindow.style.display = 'none'; isChatOpen = false; }
 }
 
 function renderChats() {
     if (!privateChats.length) {
-        chatList.innerHTML = '<div class="empty-state"><div class="icon">💬</div><h3>Нет чатов</h3><p>Найдите людей в разделе "Люди"</p></div>';
+        chatList.innerHTML = '<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><h3>Нет чатов</h3><p>Найдите людей в разделе "Люди"</p></div>';
         return;
     }
     let html = '';
     privateChats.forEach(c => {
         const ur = unreadData[c.id] || 0;
         const lastMsg = c.lastMsg || 'Напишите первым...';
+        const username = users[c.name]?.username || c.name;
         html += `
             <div class="chat-item" onclick="openPrivateChat('${c.id}', '${c.name}')">
                 <div class="chat-avatar">${c.avatar ? `<img src="${c.avatar}">` : c.name[0]}<span class="online-dot ${c.status === 'online' ? '' : 'offline'}"></span></div>
-                <div class="chat-info"><div class="chat-name">${c.name}</div><div class="chat-last">${lastMsg}</div></div>
+                <div class="chat-info"><div class="chat-name">${c.name} <span class="chat-username">@${username}</span></div><div class="chat-last">${lastMsg}</div></div>
                 ${ur ? `<div class="chat-unread">${ur}</div>` : ''}
             </div>
         `;
@@ -979,23 +976,66 @@ function renderUsers() { socket.emit('get_users', { name: currentUser }); }
 
 function renderUsersList(users) {
     if (!users || !users.length) {
-        usersList.innerHTML = '<div class="empty-state"><div class="icon">👤</div><h3>Нет пользователей</h3></div>';
+        usersList.innerHTML = '<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg><h3>Нет пользователей</h3></div>';
         return;
     }
     usersList.innerHTML = users.map(u => `
-        <div class="chat-item" onclick="startPrivateChat('${u.name}')">
+        <div class="chat-item" onclick="viewProfile('${u.name}')">
             <div class="chat-avatar">${u.avatar ? `<img src="${u.avatar}">` : u.name[0]}<span class="online-dot ${u.status === 'online' ? '' : 'offline'}"></span></div>
-            <div class="chat-info"><div class="chat-name">${u.name}</div><div class="chat-last">${u.bio || 'Привет!'}</div></div>
+            <div class="chat-info"><div class="chat-name">${u.name} <span class="chat-username">@${u.username}</span></div><div class="chat-last">${u.bio || 'Привет!'}</div></div>
+            <button onclick="event.stopPropagation();startPrivateChat('${u.name}')" class="btn-icon" style="color:var(--primary)">
+                <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            </button>
         </div>
     `).join('');
 }
 
 function searchUsers() {
-    const query = document.getElementById('searchUsers').value.toLowerCase();
+    const query = document.getElementById('searchUsers').value.toLowerCase().trim();
     document.querySelectorAll('#usersList .chat-item').forEach(el => {
-        const name = el.querySelector('.chat-name').textContent.toLowerCase();
-        el.style.display = name.includes(query) ? 'flex' : 'none';
+        const name = el.querySelector('.chat-name')?.textContent?.toLowerCase() || '';
+        const username = el.querySelector('.chat-username')?.textContent?.toLowerCase() || '';
+        const bio = el.querySelector('.chat-last')?.textContent?.toLowerCase() || '';
+        const match = name.includes(query) || username.includes(query) || bio.includes(query);
+        el.style.display = match || !query ? 'flex' : 'none';
     });
+}
+
+function viewProfile(name) {
+    if (name === currentUser) { switchPage('settings'); return; }
+    const user = Object.values(users).find(u => u.name === name);
+    if (!user) return;
+    const userPosts = posts.filter(p => p.author === name);
+    const html = `
+        <div style="padding:12px;">
+            <div class="profile-section">
+                <div class="profile-avatar" style="cursor:default">${user.avatar ? `<img src="${user.avatar}">` : name[0]}</div>
+                <div class="profile-name">${name}</div>
+                <div class="profile-username">@${user.username || name}</div>
+                <div class="profile-bio">${user.bio || 'Нет описания'}</div>
+                <div class="profile-status">${user.status === 'online' ? 'В сети' : 'Не в сети'}</div>
+                <button class="form-btn" style="margin-top:12px;width:auto;padding:8px 24px;" onclick="startPrivateChat('${name}')">Написать</button>
+                <button class="form-link" onclick="closeProfile()">← Назад</button>
+            </div>
+            <div style="margin-top:8px;">
+                <h3 style="font-size:14px;margin-bottom:4px;">Посты (${userPosts.length})</h3>
+                ${userPosts.length ? userPosts.map(p => renderPost(p)).join('') : '<div style="color:var(--text-secondary);font-size:12px;">Нет постов</div>'}
+            </div>
+        </div>
+    `;
+    const chatPage = document.getElementById('pageChats');
+    chatPage.innerHTML = html;
+    chatPage.classList.add('active');
+    document.querySelectorAll('.page').forEach(p => { if(p.id !== 'pageChats') p.classList.remove('active'); });
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    document.querySelector('.nav-item:nth-child(1)').classList.add('active');
+    document.getElementById('headerFab').style.display = 'none';
+}
+
+function closeProfile() {
+    document.getElementById('pageChats').innerHTML = '<div id="chatList"></div>';
+    renderChats();
+    document.getElementById('pageChats').classList.add('active');
 }
 
 function startPrivateChat(name) {
@@ -1112,7 +1152,6 @@ function handleFile(e) {
     e.target.value = '';
 }
 
-// ===== POSTS =====
 function createPost() { document.getElementById('postInput').click(); }
 
 function handlePost(e) {
@@ -1134,12 +1173,14 @@ function renderPost(p) {
     const avatar = p.avatar ? `<img src="${p.avatar}">` : p.author[0];
     const comments = p.comments || [];
     const hasComments = comments.length > 0;
+    const username = users[p.author]?.username || p.author;
     return `
         <div class="post-card" id="post-${p.id}">
             <div class="post-header">
-                <div class="post-avatar">${avatar}</div>
-                <div><div class="post-author">${p.author}</div><div class="post-time">${p.time}</div></div>
-                ${isAuthor ? `<button class="btn-icon" onclick="deletePost('${p.id}')" style="margin-left:auto;color:#ff3b30"><svg viewBox="0 0 24 24" width="18" height="18"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>` : ''}
+                <div class="post-avatar" onclick="viewProfile('${p.author}')">${avatar}</div>
+                <div><div class="post-author" onclick="viewProfile('${p.author}')">${p.author} <span class="post-username">@${username}</span></div></div>
+                <div class="post-time">${p.time}</div>
+                ${isAuthor ? `<button class="btn-icon" onclick="deletePost('${p.id}')" style="margin-left:auto;color:#ff3b30"><svg viewBox="0 0 24 24" width="16" height="16"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>` : ''}
             </div>
             ${p.media_type === 'image' ? `<img class="post-media" src="${p.content}" onclick="openMedia('${p.content}','image')">` : ''}
             ${p.media_type === 'video' ? `<video class="post-media" src="${p.content}" controls></video>` : ''}
@@ -1193,20 +1234,19 @@ function deletePost(postId) {
     setTimeout(() => socket.emit('get_posts'), 500);
 }
 
-// ===== SETTINGS =====
 function renderSettings() {
     const avatar = currentAvatar ? `<img src="${currentAvatar}">` : (currentUser ? currentUser[0] : '?');
+    const username = users[currentUser]?.username || currentUser;
     settingsContent.innerHTML = `
         <div class="profile-section">
             <div class="profile-avatar" onclick="document.getElementById('avatarInput').click()">${avatar}</div>
             <div class="profile-name">${currentUser || 'Гость'}</div>
+            <div class="profile-username">@${username}</div>
             <div class="profile-bio">${currentBio || 'Нажмите чтобы добавить описание'}</div>
-            <div class="profile-status">🟢 Онлайн</div>
+            <div class="profile-status">В сети</div>
         </div>
         <div class="settings-group">
-            <div class="setting-item" onclick="toggleTheme()">
-                <span class="setting-label">🌓 Тема: <span id="themeLabel">Темная</span></span>
-            </div>
+            <div class="setting-item" onclick="toggleTheme()"><span class="setting-label">Тема: <span id="themeLabel">Темная</span></span></div>
             <div class="setting-item" onclick="editBio()"><span class="setting-label">✏️ Редактировать описание</span></div>
             <div class="setting-item" onclick="shareApp()"><span class="setting-label">🔗 Поделиться</span></div>
             <div class="setting-item" onclick="logout()" style="border-left:3px solid #ff3b30"><span class="setting-label" style="color:#ff3b30">🚪 Выйти</span></div>
@@ -1238,7 +1278,6 @@ function logout() {
 
 function shareApp() { socket.emit('share_link'); }
 
-// ===== MEDIA =====
 function openMedia(src, type) {
     const viewer = document.getElementById('mediaViewer');
     viewer.classList.add('open');
@@ -1259,7 +1298,6 @@ function closeMedia() {
     document.getElementById('mediaVideo').pause();
 }
 
-// ===== AUTO LOGIN =====
 const savedToken = localStorage.getItem('directme_token');
 const savedUser = localStorage.getItem('directme_user');
 if (savedToken && savedUser) socket.emit('auto_login', { token: savedToken });
@@ -1271,7 +1309,7 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
-console.log('💬 DirectMe загружен!');
+console.log('DirectMe загружен!');
 </script>
 </body>
 </html>'''
