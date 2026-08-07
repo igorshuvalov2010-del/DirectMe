@@ -1,13 +1,32 @@
 from flask import Flask, render_template_string, request, jsonify
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from datetime import datetime, timedelta
-import random, time, os, hashlib, json, re, base64, io
+import random, time, os, hashlib, json, re, base64, io, logging
 from functools import wraps
 import threading
 
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'directme-secret-key')
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=500*1024*1024)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=500*1024*1024, ping_timeout=60, ping_interval=25)
+
+# ============================================================
+#  КОНСТАНТЫ
+# ============================================================
+MAX_USERNAME_LENGTH = 20
+MIN_USERNAME_LENGTH = 3
+MIN_PASSWORD_LENGTH = 4
+MAX_MESSAGE_LENGTH = 5000
+MAX_FILE_SIZE = 500000  # 500KB
+MAX_VOICE_SIZE = 200000  # 200KB
+MAX_POST_CAPTION = 500
+MAX_BIO_LENGTH = 200
+MAX_COMMENT_LENGTH = 300
+MAX_POSTS_TO_KEEP = 500
+MAX_MESSAGES_TO_KEEP = 300
 
 # ============================================================
 #  БАЗА ДАННЫХ
@@ -24,42 +43,95 @@ blocked_users = {}
 saved_posts = {}
 reposts = {}
 user_status_history = {}
+login_attempts = {}  # Защита от брутфорса
 
-def hash_pass(password):
+def hash_password(password):
+    """Хеширование пароля с солью"""
     salt = os.urandom(32).hex()
-    return salt + ':' + hashlib.sha256((salt + password).encode()).hexdigest()
+    return f"{salt}:{hashlib.sha256((salt + password).encode()).hexdigest()}"
 
-def verify_pass(password, hashed):
-    salt, hash_value = hashed.split(':')
-    return hash_value == hashlib.sha256((salt + password).encode()).hexdigest()
+def verify_password(password, hashed):
+    """Проверка пароля"""
+    try:
+        salt, hash_value = hashed.split(':')
+        return hash_value == hashlib.sha256((salt + password).encode()).hexdigest()
+    except:
+        return False
 
 def generate_token():
-    return hashlib.sha256(str(random.random()).encode()).hexdigest()[:32]
+    """Генерация уникального токена"""
+    return hashlib.sha256(f"{random.random()}{time.time()}".encode()).hexdigest()[:32]
 
 def get_user_by_username(username):
+    """Поиск пользователя по юзернейму"""
     for name, user in users.items():
         if user.get('username') == username:
             return name, user
     return None, None
 
 def is_blocked(user1, user2):
+    """Проверка блокировки между пользователями"""
+    if not user1 or not user2:
+        return False
     return user2 in blocked_users.get(user1, []) or user1 in blocked_users.get(user2, [])
 
+def is_user_exists(username):
+    """Проверка существования пользователя"""
+    return username in users
+
+def is_user_online(username):
+    """Проверка статуса пользователя"""
+    return users.get(username, {}).get('status') == 'online'
+
+def get_user_chats(username):
+    """Получение всех чатов пользователя"""
+    user_chats = []
+    for chat_id, chat in private_chats.items():
+        if username in chat['users']:
+            user_chats.append(chat_id)
+    for chat_id, chat in group_chats.items():
+        if username in chat['members']:
+            user_chats.append(chat_id)
+    return user_chats
+
+def get_unread_count(username, chat_id=None):
+    """Получение количества непрочитанных сообщений"""
+    if chat_id:
+        return unread.get(username, {}).get(chat_id, 0)
+    return sum(unread.get(username, {}).values())
+
+def clear_unread(username, chat_id):
+    """Очистка непрочитанных сообщений"""
+    if username in unread and chat_id in unread[username]:
+        unread[username][chat_id] = 0
+
 def save_data():
-    data = {
-        'users': users, 'posts': posts, 'stories': stories,
-        'private_chats': private_chats, 'group_chats': group_chats,
-        'unread': unread, 'blocked_users': blocked_users,
-        'saved_posts': saved_posts, 'reposts': reposts,
-        'pinned_messages': pinned_messages
-    }
-    with open('directme_data.json', 'w') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    """Сохранение данных в файл"""
+    try:
+        data = {
+            'users': users,
+            'posts': posts,
+            'stories': stories,
+            'private_chats': private_chats,
+            'group_chats': group_chats,
+            'unread': unread,
+            'blocked_users': blocked_users,
+            'saved_posts': saved_posts,
+            'reposts': reposts,
+            'pinned_messages': pinned_messages,
+            'user_status_history': user_status_history
+        }
+        with open('directme_data.json', 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.info("Данные сохранены")
+    except Exception as e:
+        logger.error(f"Ошибка сохранения данных: {e}")
 
 def load_data():
-    global users, posts, stories, private_chats, group_chats, unread, blocked_users, saved_posts, reposts, pinned_messages
+    """Загрузка данных из файла"""
+    global users, posts, stories, private_chats, group_chats, unread, blocked_users, saved_posts, reposts, pinned_messages, user_status_history
     try:
-        with open('directme_data.json', 'r') as f:
+        with open('directme_data.json', 'r', encoding='utf-8') as f:
             data = json.load(f)
             users = data.get('users', {})
             posts = data.get('posts', {})
@@ -71,23 +143,75 @@ def load_data():
             saved_posts = data.get('saved_posts', {})
             reposts = data.get('reposts', {})
             pinned_messages = data.get('pinned_messages', {})
-    except:
-        pass
+            user_status_history = data.get('user_status_history', {})
+        logger.info("Данные загружены")
+    except FileNotFoundError:
+        logger.info("Файл данных не найден, создан новый")
+    except Exception as e:
+        logger.error(f"Ошибка загрузки данных: {e}")
 
-load_data()
+def validate_username(username):
+    """Валидация имени пользователя"""
+    if not username:
+        return False, "Имя пользователя обязательно"
+    if len(username) < MIN_USERNAME_LENGTH or len(username) > MAX_USERNAME_LENGTH:
+        return False, f"Имя пользователя должно быть от {MIN_USERNAME_LENGTH} до {MAX_USERNAME_LENGTH} символов"
+    if not re.match(r'^[a-zA-Z0-9_]+$', username):
+        return False, "Имя пользователя может содержать только латиницу, цифры и _"
+    return True, ""
 
+def validate_password(password):
+    """Валидация пароля"""
+    if len(password) < MIN_PASSWORD_LENGTH:
+        return False, f"Пароль должен содержать минимум {MIN_PASSWORD_LENGTH} символа"
+    return True, ""
+
+# ============================================================
+#  ДЕКОРАТОРЫ
+# ============================================================
 def auth_required(f):
+    """Декоратор для проверки авторизации"""
     @wraps(f)
     def decorated(*args, **kwargs):
         token = request.headers.get('X-Auth-Token') or request.args.get('token')
         if not token:
             return jsonify({'error': 'Требуется авторизация'}), 401
+        
         for name, user in users.items():
             if user.get('token') == token:
+                if user.get('is_banned', False):
+                    return jsonify({'error': 'Аккаунт заблокирован'}), 403
                 return f(user=user, name=name, *args, **kwargs)
+        
         return jsonify({'error': 'Недействительный токен'}), 401
     return decorated
 
+def rate_limit(limit=5, window=60):
+    """Декоратор для ограничения частоты запросов"""
+    def decorator(f):
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            # Простая реализация через глобальный словарь
+            key = f"{f.__name__}_{request.remote_addr}"
+            now = time.time()
+            
+            if key not in login_attempts:
+                login_attempts[key] = []
+            
+            # Очищаем старые попытки
+            login_attempts[key] = [t for t in login_attempts[key] if now - t < window]
+            
+            if len(login_attempts[key]) >= limit:
+                return jsonify({'error': 'Слишком много попыток. Подождите.'}), 429
+            
+            login_attempts[key].append(now)
+            return f(*args, **kwargs)
+        return decorated
+    return decorator
+
+# ============================================================
+#  HTTP МАРШРУТЫ
+# ============================================================
 @app.route('/')
 def index():
     return render_template_string(HTML)
@@ -95,736 +219,1445 @@ def index():
 @app.route('/api/posts')
 @auth_required
 def get_posts_api(user, name):
-    return jsonify({'posts': list(posts.values())[:30]})
+    """API для получения постов"""
+    limit = request.args.get('limit', 30, type=int)
+    posts_list = list(posts.values())
+    posts_list.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
+    return jsonify({'posts': posts_list[:limit]})
 
 @app.route('/api/users')
 @auth_required
 def get_users_api(user, name):
+    """API для получения списка пользователей"""
     user_list = []
     for n, u in users.items():
         if n != name and n not in blocked_users.get(name, []):
-            user_list.append({'name': n, 'username': u.get('username', n), 'avatar': u.get('avatar'), 'status': u.get('status', 'offline'), 'bio': u.get('bio', '')})
+            user_list.append({
+                'name': n,
+                'username': u.get('username', n),
+                'avatar': u.get('avatar'),
+                'status': u.get('status', 'offline'),
+                'bio': u.get('bio', ''),
+                'last_seen': u.get('last_seen', 0)
+            })
     return jsonify({'users': user_list})
 
-@app.route('/delete_post', methods=['POST'])
-def delete_post():
+@app.route('/api/delete_post', methods=['POST'])
+@auth_required
+def delete_post_api(user, name):
+    """API для удаления поста"""
     data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Нет данных'}), 400
+    
     pid = data.get('pid', '')
-    name = data.get('n', '')
-    if pid in posts and posts[pid]['author'] == name:
-        del posts[pid]
-        save_data()
-        return {'ok': True}
-    return {'ok': False}, 403
+    if not pid:
+        return jsonify({'error': 'ID поста обязателен'}), 400
+    
+    if pid not in posts:
+        return jsonify({'error': 'Пост не найден'}), 404
+    
+    if posts[pid]['author'] != name:
+        return jsonify({'error': 'Нет прав на удаление'}), 403
+    
+    del posts[pid]
+    save_data()
+    return jsonify({'ok': True})
+
+@app.route('/api/user/<username>')
+@auth_required
+def get_user_profile(user, name, username):
+    """API для получения профиля пользователя"""
+    if username not in users:
+        return jsonify({'error': 'Пользователь не найден'}), 404
+    
+    if is_blocked(name, username):
+        return jsonify({'error': 'Доступ запрещен'}), 403
+    
+    target = users[username]
+    return jsonify({
+        'name': username,
+        'username': target.get('username', username),
+        'avatar': target.get('avatar'),
+        'bio': target.get('bio', ''),
+        'status': target.get('status', 'offline'),
+        'last_seen': target.get('last_seen', 0),
+        'created_at': target.get('created_at', 0)
+    })
 
 # ============================================================
 #  WEBSOCKET: АУТЕНТИФИКАЦИЯ
 # ============================================================
+def get_user_by_sid(sid):
+    """Получение пользователя по SID"""
+    for name, user in users.items():
+        if user.get('sid') == sid:
+            return name, user
+    return None, None
+
+def safe_emit(event, data, room=None, broadcast=False, include_self=True):
+    """Безопасная отправка события"""
+    try:
+        if broadcast:
+            emit(event, data, broadcast=True)
+        elif room:
+            emit(event, data, room=room, include_self=include_self)
+        else:
+            emit(event, data)
+    except Exception as e:
+        logger.error(f"Ошибка отправки события {event}: {e}")
+
 @socketio.on('connect')
 def handle_connect():
-    print(f"Client connected: {request.sid}")
+    """Обработчик подключения"""
+    logger.info(f"Client connected: {request.sid}")
+    # Отправляем приветствие
+    emit('connected', {'status': 'ok'})
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    for name, user in users.items():
-        if user.get('sid') == request.sid:
+    """Обработчик отключения"""
+    try:
+        name, user = get_user_by_sid(request.sid)
+        if name and user:
             user['status'] = 'offline'
             user['sid'] = ''
-            user_status_history[name] = {'status': 'offline', 'time': time.time()}
-            emit('user_status', {'name': name, 'status': 'offline', 'last_seen': time.time()}, broadcast=True)
+            user['last_seen'] = time.time()
+            user_status_history[name] = {
+                'status': 'offline',
+                'time': time.time()
+            }
+            safe_emit('user_status', {
+                'name': name,
+                'status': 'offline',
+                'last_seen': time.time()
+            }, broadcast=True)
             save_data()
-            break
+            logger.info(f"User {name} disconnected")
+    except Exception as e:
+        logger.error(f"Error in disconnect: {e}")
 
 @socketio.on('register')
 def register(data):
-    username = data.get('username', '').strip().lower()
-    password = data.get('password', '')
-    
-    if not username or len(username) < 3 or len(username) > 20:
-        emit('error', {'message': 'Юзернейм 3-20 символов'})
-        return
-    if not re.match(r'^[a-zA-Z0-9_]+$', username):
-        emit('error', {'message': 'Юзернейм: латиница, цифры, _'})
-        return
-    if username in users:
-        emit('error', {'message': 'Пользователь уже существует'})
-        return
-    if len(password) < 4:
-        emit('error', {'message': 'Пароль минимум 4 символа'})
-        return
-    
-    token = generate_token()
-    users[username] = {
-        'sid': request.sid,
-        'username': username,
-        'password': hash_pass(password),
-        'avatar': None,
-        'status': 'online',
-        'bio': '',
-        'token': token,
-        'last_seen': time.time(),
-        'created_at': time.time(),
-        'is_banned': False
-    }
-    unread[username] = {}
-    user_status_history[username] = {'status': 'online', 'time': time.time()}
-    save_data()
-    emit('login_success', {'name': username, 'username': username, 'token': token, 'avatar': None, 'bio': ''})
-    emit('user_joined', {'name': username, 'username': username, 'avatar': None, 'status': 'online'}, broadcast=True)
+    """Регистрация нового пользователя"""
+    try:
+        username = data.get('username', '').strip().lower()
+        password = data.get('password', '')
+        
+        # Валидация
+        valid, msg = validate_username(username)
+        if not valid:
+            emit('error', {'message': msg})
+            return
+        
+        valid, msg = validate_password(password)
+        if not valid:
+            emit('error', {'message': msg})
+            return
+        
+        if username in users:
+            emit('error', {'message': 'Пользователь уже существует'})
+            return
+        
+        # Создание пользователя
+        token = generate_token()
+        users[username] = {
+            'sid': request.sid,
+            'username': username,
+            'password': hash_password(password),
+            'avatar': None,
+            'status': 'online',
+            'bio': '',
+            'token': token,
+            'last_seen': time.time(),
+            'created_at': time.time(),
+            'is_banned': False
+        }
+        unread[username] = {}
+        user_status_history[username] = {'status': 'online', 'time': time.time()}
+        
+        save_data()
+        
+        # Отправка успеха
+        emit('login_success', {
+            'name': username,
+            'username': username,
+            'token': token,
+            'avatar': None,
+            'bio': ''
+        })
+        
+        safe_emit('user_joined', {
+            'name': username,
+            'username': username,
+            'avatar': None,
+            'status': 'online'
+        }, broadcast=True)
+        
+        logger.info(f"User registered: {username}")
+        
+    except Exception as e:
+        logger.error(f"Registration error: {e}")
+        emit('error', {'message': 'Ошибка регистрации'})
 
 @socketio.on('login')
 def login(data):
-    username = data.get('username', '').strip().lower()
-    password = data.get('password', '')
-    
-    if username not in users:
-        emit('error', {'message': 'Пользователь не найден'})
-        return
-    if users[username].get('is_banned', False):
-        emit('error', {'message': 'Аккаунт заблокирован'})
-        return
-    if not verify_pass(password, users[username]['password']):
-        emit('error', {'message': 'Неверный пароль'})
-        return
-    
-    token = generate_token()
-    users[username]['sid'] = request.sid
-    users[username]['status'] = 'online'
-    users[username]['token'] = token
-    users[username]['last_seen'] = time.time()
-    user_status_history[username] = {'status': 'online', 'time': time.time()}
-    save_data()
-    emit('login_success', {
-        'name': username,
-        'username': username,
-        'token': token,
-        'avatar': users[username].get('avatar'),
-        'bio': users[username].get('bio', '')
-    })
-    emit('user_joined', {
-        'name': username,
-        'username': username,
-        'avatar': users[username].get('avatar'),
-        'status': 'online'
-    }, broadcast=True)
+    """Вход в систему"""
+    try:
+        username = data.get('username', '').strip().lower()
+        password = data.get('password', '')
+        
+        # Проверка существования
+        if username not in users:
+            emit('error', {'message': 'Пользователь не найден'})
+            return
+        
+        user = users[username]
+        
+        # Проверка блокировки
+        if user.get('is_banned', False):
+            emit('error', {'message': 'Аккаунт заблокирован'})
+            return
+        
+        # Проверка пароля
+        if not verify_password(password, user['password']):
+            emit('error', {'message': 'Неверный пароль'})
+            return
+        
+        # Обновление токена
+        token = generate_token()
+        user['sid'] = request.sid
+        user['status'] = 'online'
+        user['token'] = token
+        user['last_seen'] = time.time()
+        user_status_history[username] = {'status': 'online', 'time': time.time()}
+        
+        save_data()
+        
+        emit('login_success', {
+            'name': username,
+            'username': username,
+            'token': token,
+            'avatar': user.get('avatar'),
+            'bio': user.get('bio', '')
+        })
+        
+        safe_emit('user_joined', {
+            'name': username,
+            'username': username,
+            'avatar': user.get('avatar'),
+            'status': 'online'
+        }, broadcast=True)
+        
+        logger.info(f"User logged in: {username}")
+        
+    except Exception as e:
+        logger.error(f"Login error: {e}")
+        emit('error', {'message': 'Ошибка входа'})
 
 @socketio.on('auto_login')
 def auto_login(data):
-    token = data.get('token', '')
-    for username, user in users.items():
-        if user.get('token') == token:
-            if user.get('is_banned', False):
-                emit('error', {'message': 'Аккаунт заблокирован'})
-                return
-            user['sid'] = request.sid
-            user['status'] = 'online'
-            user['last_seen'] = time.time()
-            user_status_history[username] = {'status': 'online', 'time': time.time()}
-            save_data()
-            emit('login_success', {
-                'name': username,
-                'username': username,
-                'token': token,
-                'avatar': user.get('avatar'),
-                'bio': user.get('bio', '')
-            })
-            emit('user_joined', {
-                'name': username,
-                'username': username,
-                'avatar': user.get('avatar'),
-                'status': 'online'
-            }, broadcast=True)
+    """Автоматический вход по токену"""
+    try:
+        token = data.get('token', '')
+        if not token:
+            emit('error', {'message': 'Токен не предоставлен'})
             return
+        
+        for username, user in users.items():
+            if user.get('token') == token:
+                if user.get('is_banned', False):
+                    emit('error', {'message': 'Аккаунт заблокирован'})
+                    return
+                
+                # Обновление сессии
+                user['sid'] = request.sid
+                user['status'] = 'online'
+                user['last_seen'] = time.time()
+                user_status_history[username] = {'status': 'online', 'time': time.time()}
+                
+                save_data()
+                
+                emit('login_success', {
+                    'name': username,
+                    'username': username,
+                    'token': token,
+                    'avatar': user.get('avatar'),
+                    'bio': user.get('bio', '')
+                })
+                
+                safe_emit('user_joined', {
+                    'name': username,
+                    'username': username,
+                    'avatar': user.get('avatar'),
+                    'status': 'online'
+                }, broadcast=True)
+                
+                logger.info(f"User auto-logged in: {username}")
+                return
+        
+        emit('error', {'message': 'Недействительный токен'})
+        
+    except Exception as e:
+        logger.error(f"Auto-login error: {e}")
+        emit('error', {'message': 'Ошибка автоматического входа'})
 
 # ============================================================
-#  WEBSOCKET: СООБЩЕНИЯ, РЕАКЦИИ, РЕПЛАИ, ПЕРЕСЫЛКА
+#  WEBSOCKET: СООБЩЕНИЯ И ЧАТЫ
 # ============================================================
+def create_message_id():
+    """Создание уникального ID сообщения"""
+    return f"m{int(time.time()*1000)}_{random.randint(1000, 9999)}"
+
+def add_message_to_chat(chat_id, message):
+    """Добавление сообщения в чат"""
+    if chat_id in private_chats:
+        private_chats[chat_id]['messages'].append(message)
+        if len(private_chats[chat_id]['messages']) > MAX_MESSAGES_TO_KEEP:
+            private_chats[chat_id]['messages'] = private_chats[chat_id]['messages'][-MAX_MESSAGES_TO_KEEP:]
+        return True
+    elif chat_id in group_chats:
+        group_chats[chat_id]['messages'].append(message)
+        if len(group_chats[chat_id]['messages']) > MAX_MESSAGES_TO_KEEP:
+            group_chats[chat_id]['messages'] = group_chats[chat_id]['messages'][-MAX_MESSAGES_TO_KEEP:]
+        return True
+    return False
+
+def get_chat_messages(chat_id, limit=200):
+    """Получение сообщений чата"""
+    if chat_id in private_chats:
+        return private_chats[chat_id]['messages'][-limit:]
+    elif chat_id in group_chats:
+        return group_chats[chat_id]['messages'][-limit:]
+    return []
+
+def send_push_notification(to_user, from_name, content, chat_id, msg_id):
+    """Отправка push-уведомления"""
+    try:
+        if to_user in users and users[to_user].get('sid'):
+            safe_emit('push_notification', {
+                'from': from_name,
+                'content': content[:100] + ('...' if len(content) > 100 else ''),
+                'chat_id': chat_id,
+                'msg_id': msg_id
+            }, room=users[to_user]['sid'])
+    except Exception as e:
+        logger.error(f"Push notification error: {e}")
+
 @socketio.on('send_message')
 def send_message(data):
-    name = data.get('name', '')
-    chat = data.get('chat', '')
-    msg_type = data.get('type', 'text')
-    content = data.get('content', '')
-    reply_to = data.get('reply_to', None)
-    forwarded_from = data.get('forwarded_from', None)
-    
-    if name not in users:
-        return
-    if chat in private_chats:
-        for member in private_chats[chat]['users']:
-            if member != name and is_blocked(name, member):
-                emit('error', {'message': 'Вы заблокированы'})
-                return
-    
-    if msg_type == 'text':
-        content = content[:5000]
-    elif msg_type in ['image', 'video']:
-        content = content[:500000]
-    elif msg_type == 'voice':
-        content = content[:200000]
-    
-    msg = {
-        'id': f"m{int(time.time()*1000)}_{random.randint(1000, 9999)}",
-        'name': name,
-        'type': msg_type,
-        'content': content,
-        'time': datetime.now().strftime("%H:%M"),
-        'timestamp': time.time(),
-        'avatar': users[name].get('avatar'),
-        'edited': False,
-        'reactions': {},
-        'reply_to': reply_to,
-        'forwarded_from': forwarded_from,
-        'read_by': [name],
-        'is_pinned': False
-    }
-    
-    if chat in private_chats:
-        private_chats[chat]['messages'].append(msg)
-        if len(private_chats[chat]['messages']) > 500:
-            private_chats[chat]['messages'] = private_chats[chat]['messages'][-300:]
-        save_data()
-        emit('new_message', {'chat': chat, 'message': msg}, room=chat)
-        for member in private_chats[chat]['users']:
-            if member != name:
-                unread.setdefault(member, {})
-                unread[member][chat] = unread[member].get(chat, 0) + 1
-                if users.get(member, {}).get('sid'):
-                    emit('push_notification', {'from': name, 'content': content[:100] + ('...' if len(content) > 100 else ''), 'chat_id': chat, 'msg_id': msg['id']}, room=users[member]['sid'])
-    
-    elif chat in group_chats:
-        if name not in group_chats[chat]['members']:
+    """Отправка сообщения"""
+    try:
+        name = data.get('name', '')
+        chat = data.get('chat', '')
+        msg_type = data.get('type', 'text')
+        content = data.get('content', '')
+        reply_to = data.get('reply_to', None)
+        forwarded_from = data.get('forwarded_from', None)
+        
+        if name not in users:
+            emit('error', {'message': 'Пользователь не найден'})
             return
-        group_chats[chat]['messages'].append(msg)
-        if len(group_chats[chat]['messages']) > 500:
-            group_chats[chat]['messages'] = group_chats[chat]['messages'][-300:]
-        save_data()
-        emit('new_message', {'chat': chat, 'message': msg}, room=chat)
-        for member in group_chats[chat]['members']:
-            if member != name:
-                unread.setdefault(member, {})
-                unread[member][chat] = unread[member].get(chat, 0) + 1
-                if users.get(member, {}).get('sid'):
-                    emit('push_notification', {'from': name, 'content': content[:100] + ('...' if len(content) > 100 else ''), 'chat_id': chat, 'msg_id': msg['id']}, room=users[member]['sid'])
+        
+        # Проверка блокировки
+        if chat in private_chats:
+            for member in private_chats[chat]['users']:
+                if member != name and is_blocked(name, member):
+                    emit('error', {'message': 'Вы заблокированы'})
+                    return
+        
+        # Ограничение размера
+        if msg_type == 'text':
+            content = content[:MAX_MESSAGE_LENGTH]
+        elif msg_type in ['image', 'video']:
+            content = content[:MAX_FILE_SIZE]
+        elif msg_type == 'voice':
+            content = content[:MAX_VOICE_SIZE]
+        else:
+            emit('error', {'message': 'Неизвестный тип сообщения'})
+            return
+        
+        # Создание сообщения
+        msg = {
+            'id': create_message_id(),
+            'name': name,
+            'type': msg_type,
+            'content': content,
+            'time': datetime.now().strftime("%H:%M"),
+            'timestamp': time.time(),
+            'avatar': users[name].get('avatar'),
+            'edited': False,
+            'reactions': {},
+            'reply_to': reply_to,
+            'forwarded_from': forwarded_from,
+            'read_by': [name],
+            'is_pinned': False
+        }
+        
+        # Добавление в чат
+        if add_message_to_chat(chat, msg):
+            save_data()
+            
+            # Отправка в чат
+            safe_emit('new_message', {'chat': chat, 'message': msg}, room=chat)
+            
+            # Уведомления участникам
+            if chat in private_chats:
+                for member in private_chats[chat]['users']:
+                    if member != name:
+                        unread.setdefault(member, {})
+                        unread[member][chat] = unread[member].get(chat, 0) + 1
+                        send_push_notification(member, name, content, chat, msg['id'])
+            elif chat in group_chats:
+                for member in group_chats[chat]['members']:
+                    if member != name:
+                        unread.setdefault(member, {})
+                        unread[member][chat] = unread[member].get(chat, 0) + 1
+                        send_push_notification(member, name, content, chat, msg['id'])
+        else:
+            emit('error', {'message': 'Чат не найден'})
+            
+    except Exception as e:
+        logger.error(f"Send message error: {e}")
+        emit('error', {'message': 'Ошибка отправки сообщения'})
 
 @socketio.on('join_chat')
 def join_chat(data):
-    chat = data.get('chat', '')
-    name = data.get('name', '')
-    if name not in users:
-        return
-    if chat in private_chats:
-        if name not in private_chats[chat]['users']:
+    """Присоединение к чату"""
+    try:
+        chat = data.get('chat', '')
+        name = data.get('name', '')
+        
+        if name not in users:
             return
-    elif chat in group_chats:
-        if name not in group_chats[chat]['members']:
+        
+        # Проверка прав
+        if chat in private_chats:
+            if name not in private_chats[chat]['users']:
+                return
+        elif chat in group_chats:
+            if name not in group_chats[chat]['members']:
+                return
+        else:
             return
-    else:
-        return
-    join_room(chat)
-    if name in unread:
-        unread[name][chat] = 0
-    msgs = []
-    if chat in private_chats:
-        msgs = private_chats[chat]['messages'][-200:]
-    elif chat in group_chats:
-        msgs = group_chats[chat]['messages'][-200:]
-    for msg in msgs:
-        if msg['name'] != name and name not in msg.get('read_by', []):
-            msg['read_by'] = msg.get('read_by', []) + [name]
-    save_data()
-    emit('chat_history', {'messages': msgs, 'chat': chat})
+        
+        join_room(chat)
+        
+        # Очистка непрочитанных
+        clear_unread(name, chat)
+        
+        # Получение сообщений
+        msgs = get_chat_messages(chat)
+        
+        # Отметка о прочтении
+        for msg in msgs:
+            if msg['name'] != name and name not in msg.get('read_by', []):
+                msg['read_by'] = msg.get('read_by', []) + [name]
+        
+        save_data()
+        emit('chat_history', {'messages': msgs, 'chat': chat})
+        
+        logger.info(f"User {name} joined chat {chat}")
+        
+    except Exception as e:
+        logger.error(f"Join chat error: {e}")
+
+@socketio.on('leave_chat')
+def leave_chat(data):
+    """Выход из чата"""
+    try:
+        chat = data.get('chat', '')
+        name = data.get('name', '')
+        leave_room(chat)
+        logger.info(f"User {name} left chat {chat}")
+    except Exception as e:
+        logger.error(f"Leave chat error: {e}")
 
 @socketio.on('typing')
 def typing(data):
-    chat = data.get('chat', '')
-    name = data.get('name', '')
-    is_typing = data.get('typing', False)
-    if chat in private_chats and is_blocked(name, [u for u in private_chats[chat]['users'] if u != name][0]):
-        return
-    typing_users[chat] = typing_users.get(chat, {})
-    if is_typing:
-        typing_users[chat][name] = time.time()
-    else:
-        typing_users[chat].pop(name, None)
-    emit('typing_status', {'name': name, 'typing': is_typing}, room=chat, include_self=False)
+    """Статус набора текста"""
+    try:
+        chat = data.get('chat', '')
+        name = data.get('name', '')
+        is_typing = data.get('typing', False)
+        
+        if name not in users:
+            return
+        
+        # Проверка блокировки
+        if chat in private_chats:
+            other = [u for u in private_chats[chat]['users'] if u != name]
+            if other and is_blocked(name, other[0]):
+                return
+        
+        typing_users.setdefault(chat, {})
+        if is_typing:
+            typing_users[chat][name] = time.time()
+        else:
+            typing_users[chat].pop(name, None)
+        
+        safe_emit('typing_status', {'name': name, 'typing': is_typing}, room=chat, include_self=False)
+        
+    except Exception as e:
+        logger.error(f"Typing error: {e}")
 
 @socketio.on('message_reaction')
 def message_reaction(data):
-    chat = data.get('chat', '')
-    msg_id = data.get('msg_id', '')
-    name = data.get('name', '')
-    reaction = data.get('reaction', '')
-    if name not in users or reaction not in ['❤️', '🔥', '👍', '👎', '😂', '😮', '😡', '🥰', '😱', '💯', '👏', '🙌', '🎉']:
-        return
-    msgs = []
-    if chat in private_chats:
-        msgs = private_chats[chat]['messages']
-    elif chat in group_chats:
-        msgs = group_chats[chat]['messages']
-    else:
-        return
-    for msg in msgs:
-        if msg['id'] == msg_id:
-            if name in msg['reactions'] and msg['reactions'][name] == reaction:
-                del msg['reactions'][name]
-            else:
-                msg['reactions'][name] = reaction
-            save_data()
-            emit('reaction_updated', {'chat': chat, 'msg_id': msg_id, 'reactions': msg['reactions']}, room=chat)
-            break
+    """Реакция на сообщение"""
+    try:
+        chat = data.get('chat', '')
+        msg_id = data.get('msg_id', '')
+        name = data.get('name', '')
+        reaction = data.get('reaction', '')
+        
+        valid_reactions = ['❤️', '🔥', '👍', '👎', '😂', '😮', '😡', '🥰', '😱', '💯', '👏', '🙌', '🎉']
+        
+        if name not in users or reaction not in valid_reactions:
+            return
+        
+        msgs = get_chat_messages(chat, limit=1000)
+        if not msgs:
+            return
+        
+        for msg in msgs:
+            if msg['id'] == msg_id:
+                if name in msg['reactions'] and msg['reactions'][name] == reaction:
+                    del msg['reactions'][name]
+                else:
+                    msg['reactions'][name] = reaction
+                
+                save_data()
+                safe_emit('reaction_updated', {
+                    'chat': chat,
+                    'msg_id': msg_id,
+                    'reactions': msg['reactions']
+                }, room=chat)
+                break
+                
+    except Exception as e:
+        logger.error(f"Message reaction error: {e}")
 
 @socketio.on('reply_message')
 def reply_message(data):
-    chat = data.get('chat', '')
-    msg_id = data.get('msg_id', '')
-    name = data.get('name', '')
-    reply_text = data.get('reply', '')[:500]
-    if name not in users:
-        return
-    msgs = []
-    if chat in private_chats:
-        msgs = private_chats[chat]['messages']
-    elif chat in group_chats:
-        msgs = group_chats[chat]['messages']
-    else:
-        return
-    original = None
-    for msg in msgs:
-        if msg['id'] == msg_id:
-            original = msg
-            break
-    if not original:
-        return
-    reply_msg = {
-        'id': f"m{int(time.time()*1000)}_{random.randint(1000, 9999)}",
-        'name': name,
-        'type': 'text',
-        'content': reply_text,
-        'reply_to': {'id': original['id'], 'name': original['name'], 'content': original['content'][:100] + ('...' if len(original['content']) > 100 else '')},
-        'time': datetime.now().strftime("%H:%M"),
-        'timestamp': time.time(),
-        'avatar': users[name].get('avatar'),
-        'edited': False,
-        'reactions': {},
-        'read_by': [name]
-    }
-    if chat in private_chats:
-        private_chats[chat]['messages'].append(reply_msg)
-        save_data()
-        emit('new_message', {'chat': chat, 'message': reply_msg}, room=chat)
-    elif chat in group_chats:
-        group_chats[chat]['messages'].append(reply_msg)
-        save_data()
-        emit('new_message', {'chat': chat, 'message': reply_msg}, room=chat)
+    """Ответ на сообщение"""
+    try:
+        chat = data.get('chat', '')
+        msg_id = data.get('msg_id', '')
+        name = data.get('name', '')
+        reply_text = data.get('reply', '')[:MAX_MESSAGE_LENGTH]
+        
+        if name not in users:
+            return
+        
+        msgs = get_chat_messages(chat, limit=1000)
+        if not msgs:
+            return
+        
+        # Поиск оригинального сообщения
+        original = None
+        for msg in msgs:
+            if msg['id'] == msg_id:
+                original = msg
+                break
+        
+        if not original:
+            emit('error', {'message': 'Сообщение не найдено'})
+            return
+        
+        # Создание ответа
+        reply_msg = {
+            'id': create_message_id(),
+            'name': name,
+            'type': 'text',
+            'content': reply_text,
+            'reply_to': {
+                'id': original['id'],
+                'name': original['name'],
+                'content': original['content'][:100] + ('...' if len(original['content']) > 100 else '')
+            },
+            'time': datetime.now().strftime("%H:%M"),
+            'timestamp': time.time(),
+            'avatar': users[name].get('avatar'),
+            'edited': False,
+            'reactions': {},
+            'read_by': [name]
+        }
+        
+        if add_message_to_chat(chat, reply_msg):
+            save_data()
+            safe_emit('new_message', {'chat': chat, 'message': reply_msg}, room=chat)
+            
+            # Уведомления
+            if chat in private_chats:
+                for member in private_chats[chat]['users']:
+                    if member != name:
+                        unread.setdefault(member, {})
+                        unread[member][chat] = unread[member].get(chat, 0) + 1
+                        send_push_notification(member, name, reply_text, chat, reply_msg['id'])
+            elif chat in group_chats:
+                for member in group_chats[chat]['members']:
+                    if member != name:
+                        unread.setdefault(member, {})
+                        unread[member][chat] = unread[member].get(chat, 0) + 1
+                        send_push_notification(member, name, reply_text, chat, reply_msg['id'])
+        
+    except Exception as e:
+        logger.error(f"Reply message error: {e}")
 
 @socketio.on('forward_message')
 def forward_message(data):
-    chat = data.get('chat', '')
-    msg_id = data.get('msg_id', '')
-    name = data.get('name', '')
-    target_user = data.get('to', '')
-    if name not in users or target_user not in users:
-        return
-    msgs = []
-    if chat in private_chats:
-        msgs = private_chats[chat]['messages']
-    elif chat in group_chats:
-        msgs = group_chats[chat]['messages']
-    else:
-        return
-    original = None
-    for msg in msgs:
-        if msg['id'] == msg_id:
-            original = msg
-            break
-    if not original:
-        return
-    chat_id = f"p_{min(name, target_user)}_{max(name, target_user)}"
-    if chat_id not in private_chats:
-        private_chats[chat_id] = {'users': [name, target_user], 'messages': []}
-        save_data()
-    forward_msg = {
-        'id': f"m{int(time.time()*1000)}_{random.randint(1000, 9999)}",
-        'name': name,
-        'type': original['type'],
-        'content': original['content'],
-        'time': datetime.now().strftime("%H:%M"),
-        'timestamp': time.time(),
-        'avatar': users[name].get('avatar'),
-        'edited': False,
-        'reactions': {},
-        'forwarded_from': original['name'],
-        'read_by': [name]
-    }
-    private_chats[chat_id]['messages'].append(forward_msg)
-    save_data()
-    join_room(chat_id)
-    emit('new_message', {'chat': chat_id, 'message': forward_msg}, room=chat_id)
+    """Пересылка сообщения"""
+    try:
+        chat = data.get('chat', '')
+        msg_id = data.get('msg_id', '')
+        name = data.get('name', '')
+        target_user = data.get('to', '')
+        
+        if name not in users or target_user not in users:
+            emit('error', {'message': 'Пользователь не найден'})
+            return
+        
+        if is_blocked(name, target_user):
+            emit('error', {'message': 'Вы заблокированы'})
+            return
+        
+        msgs = get_chat_messages(chat, limit=1000)
+        if not msgs:
+            emit('error', {'message': 'Сообщение не найдено'})
+            return
+        
+        # Поиск оригинального сообщения
+        original = None
+        for msg in msgs:
+            if msg['id'] == msg_id:
+                original = msg
+                break
+        
+        if not original:
+            emit('error', {'message': 'Сообщение не найдено'})
+            return
+        
+        # Создание чата для пересылки
+        chat_id = f"p_{min(name, target_user)}_{max(name, target_user)}"
+        if chat_id not in private_chats:
+            private_chats[chat_id] = {'users': [name, target_user], 'messages': []}
+            save_data()
+        
+        # Создание пересланного сообщения
+        forward_msg = {
+            'id': create_message_id(),
+            'name': name,
+            'type': original['type'],
+            'content': original['content'],
+            'time': datetime.now().strftime("%H:%M"),
+            'timestamp': time.time(),
+            'avatar': users[name].get('avatar'),
+            'edited': False,
+            'reactions': {},
+            'forwarded_from': original['name'],
+            'read_by': [name]
+        }
+        
+        if add_message_to_chat(chat_id, forward_msg):
+            save_data()
+            join_room(chat_id)
+            safe_emit('new_message', {'chat': chat_id, 'message': forward_msg}, room=chat_id)
+            
+            # Уведомление получателю
+            if target_user != name:
+                unread.setdefault(target_user, {})
+                unread[target_user][chat_id] = unread[target_user].get(chat_id, 0) + 1
+                send_push_notification(target_user, name, 'Пересланное сообщение', chat_id, forward_msg['id'])
+        
+    except Exception as e:
+        logger.error(f"Forward message error: {e}")
 
 @socketio.on('pin_message')
 def pin_message(data):
-    chat = data.get('chat', '')
-    msg_id = data.get('msg_id', '')
-    name = data.get('name', '')
-    if chat in group_chats and group_chats[chat]['admin'] != name:
-        return
-    msgs = []
-    if chat in private_chats:
-        msgs = private_chats[chat]['messages']
-    elif chat in group_chats:
-        msgs = group_chats[chat]['messages']
-    else:
-        return
-    for m in msgs:
-        if m['id'] == msg_id:
-            if msg_id in pinned_messages.get(chat, []):
-                pinned_messages[chat].remove(msg_id)
-                m['is_pinned'] = False
-            else:
-                pinned_messages.setdefault(chat, []).append(msg_id)
-                m['is_pinned'] = True
-            save_data()
-            emit('message_pinned', {'chat': chat, 'msg_id': msg_id, 'pinned': m['is_pinned']}, room=chat)
-            break
+    """Закрепление сообщения"""
+    try:
+        chat = data.get('chat', '')
+        msg_id = data.get('msg_id', '')
+        name = data.get('name', '')
+        
+        # Проверка прав (только админ группы или автор)
+        if chat in group_chats and group_chats[chat]['admin'] != name:
+            emit('error', {'message': 'Только админ может закреплять сообщения'})
+            return
+        
+        msgs = get_chat_messages(chat, limit=1000)
+        if not msgs:
+            return
+        
+        for msg in msgs:
+            if msg['id'] == msg_id:
+                pinned_messages.setdefault(chat, [])
+                if msg_id in pinned_messages[chat]:
+                    pinned_messages[chat].remove(msg_id)
+                    msg['is_pinned'] = False
+                else:
+                    pinned_messages[chat].append(msg_id)
+                    msg['is_pinned'] = True
+                
+                save_data()
+                safe_emit('message_pinned', {
+                    'chat': chat,
+                    'msg_id': msg_id,
+                    'pinned': msg['is_pinned']
+                }, room=chat)
+                break
+                
+    except Exception as e:
+        logger.error(f"Pin message error: {e}")
 
 @socketio.on('delete_message')
 def delete_message(data):
-    chat = data.get('chat', '')
-    msg_id = data.get('msg_id', '')
-    name = data.get('name', '')
-    delete_for_all = data.get('delete_for_all', False)
-    msgs = []
-    if chat in private_chats:
-        msgs = private_chats[chat]['messages']
-    elif chat in group_chats:
-        msgs = group_chats[chat]['messages']
-    else:
-        return
-    for i, m in enumerate(msgs):
-        if m['id'] == msg_id:
-            if m['name'] == name or (chat in group_chats and group_chats[chat]['admin'] == name):
-                if delete_for_all:
-                    del msgs[i]
+    """Удаление сообщения"""
+    try:
+        chat = data.get('chat', '')
+        msg_id = data.get('msg_id', '')
+        name = data.get('name', '')
+        delete_for_all = data.get('delete_for_all', False)
+        
+        msgs = get_chat_messages(chat, limit=1000)
+        if not msgs:
+            return
+        
+        for i, msg in enumerate(msgs):
+            if msg['id'] == msg_id:
+                # Проверка прав
+                if msg['name'] == name or (chat in group_chats and group_chats[chat]['admin'] == name):
+                    if delete_for_all:
+                        del msgs[i]
+                    else:
+                        msg['content'] = 'Сообщение удалено'
+                        msg['deleted'] = True
+                    
+                    save_data()
+                    safe_emit('message_deleted', {
+                        'chat': chat,
+                        'msg_id': msg_id,
+                        'delete_for_all': delete_for_all
+                    }, room=chat)
                 else:
-                    m['content'] = 'Сообщение удалено'
-                    m['deleted'] = True
-                save_data()
-                emit('message_deleted', {'chat': chat, 'msg_id': msg_id, 'delete_for_all': delete_for_all}, room=chat)
+                    emit('error', {'message': 'Нет прав на удаление'})
                 break
+                
+    except Exception as e:
+        logger.error(f"Delete message error: {e}")
 
 @socketio.on('edit_message')
 def edit_message(data):
-    chat = data.get('chat', '')
-    msg_id = data.get('msg_id', '')
-    name = data.get('name', '')
-    new_content = data.get('content', '')[:5000]
-    msgs = []
-    if chat in private_chats:
-        msgs = private_chats[chat]['messages']
-    elif chat in group_chats:
-        msgs = group_chats[chat]['messages']
-    else:
-        return
-    for m in msgs:
-        if m['id'] == msg_id and m['name'] == name:
-            m['content'] = new_content
-            m['edited'] = True
-            save_data()
-            emit('message_edited', {'chat': chat, 'message': m}, room=chat)
-            break
+    """Редактирование сообщения"""
+    try:
+        chat = data.get('chat', '')
+        msg_id = data.get('msg_id', '')
+        name = data.get('name', '')
+        new_content = data.get('content', '')[:MAX_MESSAGE_LENGTH]
+        
+        msgs = get_chat_messages(chat, limit=1000)
+        if not msgs:
+            return
+        
+        for msg in msgs:
+            if msg['id'] == msg_id and msg['name'] == name:
+                msg['content'] = new_content
+                msg['edited'] = True
+                save_data()
+                safe_emit('message_edited', {'chat': chat, 'message': msg}, room=chat)
+                break
+                
+    except Exception as e:
+        logger.error(f"Edit message error: {e}")
 
 # ============================================================
-#  WEBSOCKET: ГРУППЫ, СТОРИС, ПОСТЫ
+#  WEBSOCKET: ГРУППЫ
 # ============================================================
 @socketio.on('create_group')
 def create_group(data):
-    name = data.get('name', '')
-    group_name = data.get('group_name', 'Новая группа')
-    members = data.get('members', [])
-    if name not in users or len(members) < 2:
-        emit('error', {'message': 'Нужно минимум 2 участника'})
-        return
-    chat_id = f"g_{int(time.time()*1000)}_{random.randint(1000, 9999)}"
-    group_chats[chat_id] = {'name': group_name, 'admin': name, 'members': [name] + members, 'messages': [], 'created_at': time.time(), 'avatar': None}
-    save_data()
-    join_room(chat_id)
-    for member in [name] + members:
-        if users.get(member, {}).get('sid'):
-            emit('group_created', {'chat_id': chat_id, 'name': group_name, 'members': [name] + members}, room=users[member]['sid'])
-    emit('private_chat', {'chat_id': chat_id, 'user': group_name, 'avatar': None, 'messages': [], 'is_group': True})
+    """Создание группы"""
+    try:
+        name = data.get('name', '')
+        group_name = data.get('group_name', 'Новая группа')
+        members = data.get('members', [])
+        
+        if name not in users:
+            emit('error', {'message': 'Пользователь не найден'})
+            return
+        
+        if len(members) < 2:
+            emit('error', {'message': 'Нужно минимум 2 участника'})
+            return
+        
+        # Проверка существования участников
+        for member in members:
+            if member not in users:
+                emit('error', {'message': f'Участник {member} не найден'})
+                return
+        
+        chat_id = f"g_{int(time.time()*1000)}_{random.randint(1000, 9999)}"
+        group_chats[chat_id] = {
+            'name': group_name,
+            'admin': name,
+            'members': [name] + members,
+            'messages': [],
+            'created_at': time.time(),
+            'avatar': None
+        }
+        
+        save_data()
+        join_room(chat_id)
+        
+        # Уведомление участников
+        for member in [name] + members:
+            if users.get(member, {}).get('sid'):
+                safe_emit('group_created', {
+                    'chat_id': chat_id,
+                    'name': group_name,
+                    'members': [name] + members
+                }, room=users[member]['sid'])
+        
+        safe_emit('private_chat', {
+            'chat_id': chat_id,
+            'user': group_name,
+            'avatar': None,
+            'messages': [],
+            'is_group': True
+        })
+        
+        logger.info(f"Group created: {chat_id} by {name}")
+        
+    except Exception as e:
+        logger.error(f"Create group error: {e}")
+        emit('error', {'message': 'Ошибка создания группы'})
 
 @socketio.on('add_group_member')
 def add_group_member(data):
-    chat = data.get('chat', '')
-    name = data.get('name', '')
-    new_member = data.get('member', '')
-    if chat not in group_chats or group_chats[chat]['admin'] != name or new_member not in users:
-        return
-    if new_member not in group_chats[chat]['members']:
+    """Добавление участника в группу"""
+    try:
+        chat = data.get('chat', '')
+        name = data.get('name', '')
+        new_member = data.get('member', '')
+        
+        if chat not in group_chats:
+            emit('error', {'message': 'Группа не найдена'})
+            return
+        
+        if group_chats[chat]['admin'] != name:
+            emit('error', {'message': 'Только админ может добавлять участников'})
+            return
+        
+        if new_member not in users:
+            emit('error', {'message': 'Пользователь не найден'})
+            return
+        
+        if new_member in group_chats[chat]['members']:
+            emit('error', {'message': 'Участник уже в группе'})
+            return
+        
         group_chats[chat]['members'].append(new_member)
         save_data()
+        
+        # Уведомления
         if users.get(new_member, {}).get('sid'):
-            emit('group_updated', {'chat': chat, 'members': group_chats[chat]['members']}, room=users[new_member]['sid'])
-        emit('group_updated', {'chat': chat, 'members': group_chats[chat]['members']}, room=chat)
+            safe_emit('group_updated', {
+                'chat': chat,
+                'members': group_chats[chat]['members']
+            }, room=users[new_member]['sid'])
+        
+        safe_emit('group_updated', {
+            'chat': chat,
+            'members': group_chats[chat]['members']
+        }, room=chat)
+        
+        logger.info(f"User {new_member} added to group {chat} by {name}")
+        
+    except Exception as e:
+        logger.error(f"Add group member error: {e}")
 
 @socketio.on('remove_group_member')
 def remove_group_member(data):
-    chat = data.get('chat', '')
-    name = data.get('name', '')
-    remove_user = data.get('user', '')
-    if chat not in group_chats or group_chats[chat]['admin'] != name or remove_user not in group_chats[chat]['members'] or remove_user == group_chats[chat]['admin']:
-        return
-    group_chats[chat]['members'].remove(remove_user)
-    save_data()
-    emit('group_updated', {'chat': chat, 'members': group_chats[chat]['members']}, room=chat)
+    """Удаление участника из группы"""
+    try:
+        chat = data.get('chat', '')
+        name = data.get('name', '')
+        remove_user = data.get('user', '')
+        
+        if chat not in group_chats:
+            emit('error', {'message': 'Группа не найдена'})
+            return
+        
+        if group_chats[chat]['admin'] != name:
+            emit('error', {'message': 'Только админ может удалять участников'})
+            return
+        
+        if remove_user not in group_chats[chat]['members']:
+            emit('error', {'message': 'Участник не в группе'})
+            return
+        
+        if remove_user == group_chats[chat]['admin']:
+            emit('error', {'message': 'Нельзя удалить админа'})
+            return
+        
+        group_chats[chat]['members'].remove(remove_user)
+        save_data()
+        
+        safe_emit('group_updated', {
+            'chat': chat,
+            'members': group_chats[chat]['members']
+        }, room=chat)
+        
+        logger.info(f"User {remove_user} removed from group {chat} by {name}")
+        
+    except Exception as e:
+        logger.error(f"Remove group member error: {e}")
 
+# ============================================================
+#  WEBSOCKET: СТОРИС
+# ============================================================
 @socketio.on('create_story')
 def create_story(data):
-    name = data.get('name', '')
-    content = data.get('content', '')
-    media_type = data.get('type', 'image')
-    if name not in users:
-        return
-    story = {'id': f"s{int(time.time()*1000)}_{random.randint(1000, 9999)}", 'name': name, 'content': content, 'type': media_type, 'timestamp': time.time(), 'views': []}
-    stories.setdefault(name, []).append(story)
-    if len(stories[name]) > 10:
-        stories[name] = stories[name][-10:]
-    save_data()
-    emit('new_story', {'name': name, 'story': story}, broadcast=True)
-    threading.Timer(86400, lambda: delete_story_after_time(name, story['id'])).start()
+    """Создание сторис"""
+    try:
+        name = data.get('name', '')
+        content = data.get('content', '')
+        media_type = data.get('type', 'image')
+        
+        if name not in users:
+            return
+        
+        story = {
+            'id': f"s{int(time.time()*1000)}_{random.randint(1000, 9999)}",
+            'name': name,
+            'content': content,
+            'type': media_type,
+            'timestamp': time.time(),
+            'views': []
+        }
+        
+        stories.setdefault(name, []).append(story)
+        
+        # Ограничение количества сторис
+        if len(stories[name]) > 10:
+            stories[name] = stories[name][-10:]
+        
+        save_data()
+        safe_emit('new_story', {'name': name, 'story': story}, broadcast=True)
+        
+        # Автоудаление через 24 часа
+        threading.Timer(86400, lambda: delete_story_after_time(name, story['id'])).start()
+        
+        logger.info(f"Story created by {name}")
+        
+    except Exception as e:
+        logger.error(f"Create story error: {e}")
 
 def delete_story_after_time(name, story_id):
-    if name in stories:
-        stories[name] = [s for s in stories[name] if s['id'] != story_id]
-        save_data()
-        emit('story_deleted', {'name': name, 'story_id': story_id}, broadcast=True)
+    """Удаление сторис после истечения времени"""
+    try:
+        if name in stories:
+            stories[name] = [s for s in stories[name] if s['id'] != story_id]
+            if not stories[name]:
+                del stories[name]
+            save_data()
+            safe_emit('story_deleted', {'name': name, 'story_id': story_id}, broadcast=True)
+            logger.info(f"Story {story_id} deleted after timeout")
+    except Exception as e:
+        logger.error(f"Delete story after time error: {e}")
 
 @socketio.on('view_story')
 def view_story(data):
-    name = data.get('name', '')
-    story_id = data.get('story_id', '')
-    viewer = data.get('viewer', '')
-    if name in stories:
+    """Просмотр сторис"""
+    try:
+        name = data.get('name', '')
+        story_id = data.get('story_id', '')
+        viewer = data.get('viewer', '')
+        
+        if name not in stories:
+            return
+        
         for story in stories[name]:
             if story['id'] == story_id and viewer not in story['views']:
                 story['views'].append(viewer)
                 save_data()
-                emit('story_viewed', {'name': name, 'story_id': story_id, 'views': story['views']}, broadcast=True)
+                safe_emit('story_viewed', {
+                    'name': name,
+                    'story_id': story_id,
+                    'views': story['views']
+                }, broadcast=True)
                 break
+                
+    except Exception as e:
+        logger.error(f"View story error: {e}")
 
+# ============================================================
+#  WEBSOCKET: ПОСТЫ
+# ============================================================
 @socketio.on('create_post')
 def create_post(data):
-    name = data.get('name', '')
-    content = data.get('content', '')
-    media_type = data.get('media_type', 'image')
-    caption = data.get('caption', '')[:500]
-    hashtags = re.findall(r'#(\w+)', caption)
-    if name not in users or len(content) > 500000:
-        return
-    post_id = f"p{int(time.time()*1000)}_{random.randint(1000, 9999)}"
-    posts[post_id] = {'id': post_id, 'author': name, 'avatar': users[name].get('avatar'), 'content': content, 'media_type': media_type, 'caption': caption, 'hashtags': hashtags, 'likes': [], 'comments': [], 'saved_by': [], 'reposts': [], 'time': datetime.now().strftime("%d.%m.%Y %H:%M"), 'timestamp': time.time()}
-    save_data()
-    emit('new_post', {'post': posts[post_id]}, broadcast=True)
+    """Создание поста"""
+    try:
+        name = data.get('name', '')
+        content = data.get('content', '')
+        media_type = data.get('media_type', 'image')
+        caption = data.get('caption', '')[:MAX_POST_CAPTION]
+        
+        if name not in users:
+            emit('error', {'message': 'Пользователь не найден'})
+            return
+        
+        if len(content) > MAX_FILE_SIZE:
+            emit('error', {'message': 'Файл слишком большой'})
+            return
+        
+        hashtags = re.findall(r'#(\w+)', caption)
+        
+        post_id = f"p{int(time.time()*1000)}_{random.randint(1000, 9999)}"
+        posts[post_id] = {
+            'id': post_id,
+            'author': name,
+            'avatar': users[name].get('avatar'),
+            'content': content,
+            'media_type': media_type,
+            'caption': caption,
+            'hashtags': hashtags,
+            'likes': [],
+            'comments': [],
+            'saved_by': [],
+            'reposts': [],
+            'time': datetime.now().strftime("%d.%m.%Y %H:%M"),
+            'timestamp': time.time()
+        }
+        
+        # Ограничение количества постов
+        if len(posts) > MAX_POSTS_TO_KEEP:
+            oldest_posts = sorted(posts.keys(), key=lambda x: posts[x]['timestamp'])[:len(posts) - MAX_POSTS_TO_KEEP]
+            for pid in oldest_posts:
+                del posts[pid]
+        
+        save_data()
+        safe_emit('new_post', {'post': posts[post_id]}, broadcast=True)
+        
+        logger.info(f"Post created by {name}")
+        
+    except Exception as e:
+        logger.error(f"Create post error: {e}")
+        emit('error', {'message': 'Ошибка создания поста'})
 
 @socketio.on('get_posts')
 def get_posts():
-    emit('posts_list', {'posts': list(posts.values())[:50]})
+    """Получение списка постов"""
+    try:
+        posts_list = list(posts.values())
+        posts_list.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
+        safe_emit('posts_list', {'posts': posts_list[:50]})
+    except Exception as e:
+        logger.error(f"Get posts error: {e}")
 
 @socketio.on('like_post')
 def like_post(data):
-    post_id = data.get('post_id', '')
-    name = data.get('name', '')
-    if post_id in posts:
+    """Лайк поста"""
+    try:
+        post_id = data.get('post_id', '')
+        name = data.get('name', '')
+        
+        if post_id not in posts:
+            return
+        
         if name in posts[post_id]['likes']:
             posts[post_id]['likes'].remove(name)
         else:
             posts[post_id]['likes'].append(name)
+        
         save_data()
-        emit('post_updated', {'post': posts[post_id]}, broadcast=True)
+        safe_emit('post_updated', {'post': posts[post_id]}, broadcast=True)
+        
+    except Exception as e:
+        logger.error(f"Like post error: {e}")
 
 @socketio.on('comment_post')
 def comment_post(data):
-    post_id = data.get('post_id', '')
-    name = data.get('name', '')
-    comment = data.get('comment', '')[:300]
-    if post_id in posts:
-        posts[post_id]['comments'].append({'id': f"c{int(time.time()*1000)}_{random.randint(1000, 9999)}", 'name': name, 'avatar': users.get(name, {}).get('avatar'), 'comment': comment, 'time': datetime.now().strftime("%H:%M"), 'timestamp': time.time(), 'likes': []})
+    """Комментарий к посту"""
+    try:
+        post_id = data.get('post_id', '')
+        name = data.get('name', '')
+        comment = data.get('comment', '')[:MAX_COMMENT_LENGTH]
+        
+        if post_id not in posts or name not in users:
+            return
+        
+        if not comment.strip():
+            return
+        
+        posts[post_id]['comments'].append({
+            'id': f"c{int(time.time()*1000)}_{random.randint(1000, 9999)}",
+            'name': name,
+            'avatar': users.get(name, {}).get('avatar'),
+            'comment': comment,
+            'time': datetime.now().strftime("%H:%M"),
+            'timestamp': time.time(),
+            'likes': []
+        })
+        
         save_data()
-        emit('post_updated', {'post': posts[post_id]}, broadcast=True)
+        safe_emit('post_updated', {'post': posts[post_id]}, broadcast=True)
+        
+    except Exception as e:
+        logger.error(f"Comment post error: {e}")
 
 @socketio.on('save_post')
 def save_post(data):
-    post_id = data.get('post_id', '')
-    name = data.get('name', '')
-    if post_id in posts:
+    """Сохранение поста"""
+    try:
+        post_id = data.get('post_id', '')
+        name = data.get('name', '')
+        
+        if post_id not in posts:
+            return
+        
         if name in posts[post_id]['saved_by']:
             posts[post_id]['saved_by'].remove(name)
         else:
             posts[post_id]['saved_by'].append(name)
+        
         save_data()
-        emit('post_updated', {'post': posts[post_id]}, broadcast=True)
+        safe_emit('post_updated', {'post': posts[post_id]}, broadcast=True)
+        
+    except Exception as e:
+        logger.error(f"Save post error: {e}")
 
 @socketio.on('repost_post')
 def repost_post(data):
-    post_id = data.get('post_id', '')
-    name = data.get('name', '')
-    if post_id in posts and name not in posts[post_id]['reposts']:
-        posts[post_id]['reposts'].append(name)
-        save_data()
-        emit('post_updated', {'post': posts[post_id]}, broadcast=True)
+    """Репост поста"""
+    try:
+        post_id = data.get('post_id', '')
+        name = data.get('name', '')
+        
+        if post_id not in posts:
+            return
+        
+        if name not in posts[post_id]['reposts']:
+            posts[post_id]['reposts'].append(name)
+            save_data()
+            safe_emit('post_updated', {'post': posts[post_id]}, broadcast=True)
+        
+    except Exception as e:
+        logger.error(f"Repost post error: {e}")
 
 # ============================================================
-#  WEBSOCKET: ПРОФИЛЬ, БЛОКИРОВКА, ПОИСК, ЧАТЫ
+#  WEBSOCKET: ПРОФИЛЬ И ПОЛЬЗОВАТЕЛИ
 # ============================================================
 @socketio.on('update_avatar')
 def update_avatar(data):
-    name = data.get('name', '')
-    avatar = data.get('avatar', '')
-    if name in users:
-        users[name]['avatar'] = avatar
-        save_data()
-        emit('avatar_updated', {'name': name, 'avatar': avatar}, broadcast=True)
+    """Обновление аватара"""
+    try:
+        name = data.get('name', '')
+        avatar = data.get('avatar', '')
+        
+        if name in users:
+            users[name]['avatar'] = avatar
+            save_data()
+            safe_emit('avatar_updated', {'name': name, 'avatar': avatar}, broadcast=True)
+            logger.info(f"Avatar updated for {name}")
+            
+    except Exception as e:
+        logger.error(f"Update avatar error: {e}")
 
 @socketio.on('update_bio')
 def update_bio(data):
-    name = data.get('name', '')
-    bio = data.get('bio', '')[:200]
-    if name in users:
-        users[name]['bio'] = bio
-        save_data()
-        emit('bio_updated', {'name': name, 'bio': bio})
+    """Обновление био"""
+    try:
+        name = data.get('name', '')
+        bio = data.get('bio', '')[:MAX_BIO_LENGTH]
+        
+        if name in users:
+            users[name]['bio'] = bio
+            save_data()
+            safe_emit('bio_updated', {'name': name, 'bio': bio})
+            
+    except Exception as e:
+        logger.error(f"Update bio error: {e}")
 
 @socketio.on('update_profile')
 def update_profile(data):
-    name = data.get('name', '')
-    new_name = data.get('new_name', '').strip()
-    new_username = data.get('new_username', '').strip().lower()
-    if name not in users:
-        return
-    if new_name and len(new_name) >= 2 and len(new_name) <= 20 and re.match(r'^[a-zA-Zа-яА-Я0-9_]+$', new_name) and new_name not in users:
-        user_data = users.pop(name)
-        users[new_name] = user_data
-        for chat_id, chat in private_chats.items():
-            if name in chat['users']:
-                chat['users'] = [new_name if u == name else u for u in chat['users']]
-        for chat_id, chat in group_chats.items():
-            if name in chat['members']:
-                chat['members'] = [new_name if u == name else u for u in chat['members']]
-            if chat['admin'] == name:
-                chat['admin'] = new_name
-        save_data()
-        emit('profile_updated', {'old_name': name, 'new_name': new_name}, broadcast=True)
-        return
-    if new_username and len(new_username) >= 3 and len(new_username) <= 20 and re.match(r'^[a-zA-Z0-9_]+$', new_username):
-        for n, u in users.items():
-            if u.get('username') == new_username and n != name:
-                emit('error', {'message': 'Юзернейм занят'})
+    """Обновление профиля"""
+    try:
+        name = data.get('name', '')
+        new_name = data.get('new_name', '').strip()
+        new_username = data.get('new_username', '').strip().lower()
+        
+        if name not in users:
+            emit('error', {'message': 'Пользователь не найден'})
+            return
+        
+        # Обновление имени
+        if new_name and new_name != name:
+            valid, msg = validate_username(new_name)
+            if not valid:
+                emit('error', {'message': msg})
                 return
-        users[name]['username'] = new_username
-        save_data()
-        emit('username_updated', {'name': name, 'username': new_username}, broadcast=True)
+            
+            if new_name in users:
+                emit('error', {'message': 'Имя уже занято'})
+                return
+            
+            # Перенос данных
+            user_data = users.pop(name)
+            users[new_name] = user_data
+            
+            # Обновление в чатах
+            for chat_id, chat in private_chats.items():
+                if name in chat['users']:
+                    chat['users'] = [new_name if u == name else u for u in chat['users']]
+            
+            for chat_id, chat in group_chats.items():
+                if name in chat['members']:
+                    chat['members'] = [new_name if u == name else u for u in chat['members']]
+                if chat['admin'] == name:
+                    chat['admin'] = new_name
+            
+            save_data()
+            safe_emit('profile_updated', {'old_name': name, 'new_name': new_name}, broadcast=True)
+            logger.info(f"Profile name updated: {name} -> {new_name}")
+            return
+        
+        # Обновление юзернейма
+        if new_username and new_username != users[name].get('username'):
+            valid, msg = validate_username(new_username)
+            if not valid:
+                emit('error', {'message': msg})
+                return
+            
+            # Проверка уникальности
+            for n, u in users.items():
+                if u.get('username') == new_username and n != name:
+                    emit('error', {'message': 'Юзернейм занят'})
+                    return
+            
+            users[name]['username'] = new_username
+            save_data()
+            safe_emit('username_updated', {'name': name, 'username': new_username}, broadcast=True)
+            logger.info(f"Username updated: {name} -> {new_username}")
+            
+    except Exception as e:
+        logger.error(f"Update profile error: {e}")
+        emit('error', {'message': 'Ошибка обновления профиля'})
 
 @socketio.on('block_user')
 def block_user(data):
-    name = data.get('name', '')
-    block_name = data.get('block_name', '')
-    if name not in users or block_name not in users:
-        return
-    if block_name not in blocked_users.get(name, []):
-        blocked_users.setdefault(name, []).append(block_name)
-        save_data()
-        emit('user_blocked', {'by': name, 'blocked': block_name}, room=users[block_name].get('sid') if users[block_name].get('sid') else '')
+    """Блокировка пользователя"""
+    try:
+        name = data.get('name', '')
+        block_name = data.get('block_name', '')
+        
+        if name not in users or block_name not in users:
+            emit('error', {'message': 'Пользователь не найден'})
+            return
+        
+        if name == block_name:
+            emit('error', {'message': 'Нельзя заблокировать себя'})
+            return
+        
+        if block_name not in blocked_users.get(name, []):
+            blocked_users.setdefault(name, []).append(block_name)
+            save_data()
+            
+            # Уведомление
+            if users.get(block_name, {}).get('sid'):
+                safe_emit('user_blocked', {
+                    'by': name,
+                    'blocked': block_name
+                }, room=users[block_name]['sid'])
+            
+            logger.info(f"User {name} blocked {block_name}")
+            
+    except Exception as e:
+        logger.error(f"Block user error: {e}")
 
 @socketio.on('unblock_user')
 def unblock_user(data):
-    name = data.get('name', '')
-    unblock_name = data.get('unblock_name', '')
-    if name in blocked_users and unblock_name in blocked_users[name]:
-        blocked_users[name].remove(unblock_name)
-        save_data()
-        emit('user_unblocked', {'by': name, 'unblocked': unblock_name}, room=users[unblock_name].get('sid') if users[unblock_name].get('sid') else '')
+    """Разблокировка пользователя"""
+    try:
+        name = data.get('name', '')
+        unblock_name = data.get('unblock_name', '')
+        
+        if name in blocked_users and unblock_name in blocked_users[name]:
+            blocked_users[name].remove(unblock_name)
+            save_data()
+            
+            if users.get(unblock_name, {}).get('sid'):
+                safe_emit('user_unblocked', {
+                    'by': name,
+                    'unblocked': unblock_name
+                }, room=users[unblock_name]['sid'])
+            
+            logger.info(f"User {name} unblocked {unblock_name}")
+            
+    except Exception as e:
+        logger.error(f"Unblock user error: {e}")
 
 @socketio.on('search_users')
 def search_users(data):
-    query = data.get('query', '').lower()
-    name = data.get('name', '')
-    results = []
-    for n, u in users.items():
-        if n != name and n not in blocked_users.get(name, []):
-            if query in n.lower() or query in u.get('username', '').lower():
-                results.append({'name': n, 'username': u.get('username', n), 'avatar': u.get('avatar'), 'status': u.get('status', 'offline')})
-    emit('search_results', {'results': results[:20]})
+    """Поиск пользователей"""
+    try:
+        query = data.get('query', '').lower()
+        name = data.get('name', '')
+        
+        if name not in users:
+            return
+        
+        results = []
+        for n, u in users.items():
+            if n != name and n not in blocked_users.get(name, []):
+                if query in n.lower() or query in u.get('username', '').lower():
+                    results.append({
+                        'name': n,
+                        'username': u.get('username', n),
+                        'avatar': u.get('avatar'),
+                        'status': u.get('status', 'offline')
+                    })
+                    if len(results) >= 20:
+                        break
+        
+        safe_emit('search_results', {'results': results})
+        
+    except Exception as e:
+        logger.error(f"Search users error: {e}")
 
 @socketio.on('search_hashtag')
 def search_hashtag(data):
-    tag = data.get('tag', '').lower()
-    results = []
-    for post in list(posts.values()):
-        if tag in [h.lower() for h in post.get('hashtags', [])]:
-            results.append(post)
-    emit('search_results', {'posts': results[:30]})
+    """Поиск по хештегу"""
+    try:
+        tag = data.get('tag', '').lower()
+        results = []
+        
+        for post in list(posts.values()):
+            if tag in [h.lower() for h in post.get('hashtags', [])]:
+                results.append(post)
+        
+        safe_emit('search_results', {'posts': results[:30]})
+        
+    except Exception as e:
+        logger.error(f"Search hashtag error: {e}")
 
 @socketio.on('search_messages')
 def search_messages(data):
-    chat = data.get('chat', '')
-    query = data.get('query', '').lower()
-    name = data.get('name', '')
-    if name not in users:
-        return
-    msgs = []
-    if chat in private_chats:
-        msgs = private_chats[chat]['messages']
-    elif chat in group_chats:
-        msgs = group_chats[chat]['messages']
-    else:
-        return
-    results = [m for m in msgs if query in m['content'].lower()]
-    emit('search_results', {'messages': results[:50]})
-
-@socketio.on('logout')
-def logout(data):
-    token = data.get('token', '')
-    for name, user in users.items():
-        if user.get('token') == token:
-            user['token'] = ''
-            user['status'] = 'offline'
-            user['sid'] = ''
-            user_status_history[name] = {'status': 'offline', 'time': time.time()}
-            save_data()
-            emit('user_status', {'name': name, 'status': 'offline', 'last_seen': time.time()}, broadcast=True)
-            break
+    """Поиск сообщений в чате"""
+    try:
+        chat = data.get('chat', '')
+        query = data.get('query', '').lower()
+        name = data.get('name', '')
+        
+        if name not in users:
+            return
+        
+        msgs = get_chat_messages(chat, limit=1000)
+        results = [m for m in msgs if query in m['content'].lower()]
+        
+        safe_emit('search_results', {'messages': results[:50]})
+        
+    except Exception as e:
+        logger.error(f"Search messages error: {e}")
 
 @socketio.on('get_users')
 def get_users(data):
-    name = data.get('name', '')
-    user_list = []
-    for n, u in users.items():
-        if n != name and n not in blocked_users.get(name, []):
-            user_list.append({'name': n, 'username': u.get('username', n), 'avatar': u.get('avatar'), 'status': u.get('status', 'offline'), 'bio': u.get('bio', ''), 'last_seen': u.get('last_seen', 0)})
-    emit('users_list', {'users': user_list})
+    """Получение списка пользователей"""
+    try:
+        name = data.get('name', '')
+        
+        if name not in users:
+            return
+        
+        user_list = []
+        for n, u in users.items():
+            if n != name and n not in blocked_users.get(name, []):
+                user_list.append({
+                    'name': n,
+                    'username': u.get('username', n),
+                    'avatar': u.get('avatar'),
+                    'status': u.get('status', 'offline'),
+                    'bio': u.get('bio', ''),
+                    'last_seen': u.get('last_seen', 0)
+                })
+        
+        safe_emit('users_list', {'users': user_list})
+        
+    except Exception as e:
+        logger.error(f"Get users error: {e}")
+
+@socketio.on('logout')
+def logout(data):
+    """Выход из системы"""
+    try:
+        token = data.get('token', '')
+        
+        for name, user in users.items():
+            if user.get('token') == token:
+                user['token'] = ''
+                user['status'] = 'offline'
+                user['sid'] = ''
+                user['last_seen'] = time.time()
+                user_status_history[name] = {'status': 'offline', 'time': time.time()}
+                save_data()
+                
+                safe_emit('user_status', {
+                    'name': name,
+                    'status': 'offline',
+                    'last_seen': time.time()
+                }, broadcast=True)
+                
+                logger.info(f"User logged out: {name}")
+                break
+                
+    except Exception as e:
+        logger.error(f"Logout error: {e}")
 
 @socketio.on('start_private_chat')
 def start_private_chat(data):
-    user1 = data.get('user1', '')
-    user2 = data.get('user2', '')
-    if user1 not in users or user2 not in users or is_blocked(user1, user2):
-        emit('error', {'message': 'Вы заблокированы'})
-        return
-    chat_id = f"p_{min(user1, user2)}_{max(user1, user2)}"
-    if chat_id not in private_chats:
-        private_chats[chat_id] = {'users': [user1, user2], 'messages': []}
-        save_data()
-    join_room(chat_id)
-    if user1 in unread:
-        unread[user1][chat_id] = 0
-    msgs = private_chats[chat_id]['messages'][-200:]
-    emit('private_chat', {'chat_id': chat_id, 'user': user2, 'avatar': users[user2].get('avatar'), 'messages': msgs, 'is_group': False})
+    """Начало приватного чата"""
+    try:
+        user1 = data.get('user1', '')
+        user2 = data.get('user2', '')
+        
+        if user1 not in users or user2 not in users:
+            emit('error', {'message': 'Пользователь не найден'})
+            return
+        
+        if is_blocked(user1, user2):
+            emit('error', {'message': 'Вы заблокированы'})
+            return
+        
+        chat_id = f"p_{min(user1, user2)}_{max(user1, user2)}"
+        
+        if chat_id not in private_chats:
+            private_chats[chat_id] = {'users': [user1, user2], 'messages': []}
+            save_data()
+        
+        join_room(chat_id)
+        clear_unread(user1, chat_id)
+        
+        msgs = get_chat_messages(chat_id)
+        
+        safe_emit('private_chat', {
+            'chat_id': chat_id,
+            'user': user2,
+            'avatar': users[user2].get('avatar'),
+            'messages': msgs,
+            'is_group': False
+        })
+        
+        logger.info(f"Private chat started: {user1} - {user2}")
+        
+    except Exception as e:
+        logger.error(f"Start private chat error: {e}")
 
 @socketio.on('share_link')
 def share_link():
-    emit('share_link', {'url': request.host})
-
+    """Поделиться ссылкой"""
+    try:
+        safe_emit('share_link', {'url': request.host})
+    except Exception as e:
+        logger.error(f"Share link error: {e}")
 
 # ============================================================
 #  HTML (ВЕСЬ КОД СТРАНИЦЫ — CSS, HTML, JAVASCRIPT)
@@ -974,6 +1807,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
 .form-input:focus { border-color: var(--primary); }
 .form-btn { width: 100%; padding: 10px; background: var(--primary-gradient); color: #000; border: none; border-radius: var(--radius-sm); font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; }
 .form-btn:active { opacity: 0.8; }
+.form-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .form-link { background: none; border: none; color: var(--primary); font-size: 12px; cursor: pointer; margin-top: 8px; }
 .code-box { background: var(--bg-input); padding: 10px; border-radius: var(--radius-sm); font-size: 24px; letter-spacing: 8px; font-weight: 600; color: var(--primary); margin: 8px 0; font-family: monospace; }
 .hidden { display: none !important; }
@@ -1109,20 +1943,46 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.min.js"></script>
 <script>
 // ============================================================
-//  ПОЛНЫЙ JAVASCRIPT + ПЕРЕКЛЮЧАТЕЛЬ ЯЗЫКА
+//  ПОЛНЫЙ JAVASCRIPT
 // ============================================================
-const socket = io();
-let currentUser = null, currentToken = null, currentChat = null, currentChatName = '';
-let currentAvatar = null, currentBio = '', currentUsername = '', typingTimeout = null;
-let isChatOpen = false, isRecording = false, mediaRecorder = null, audioChunks = [];
-let unreadData = {}, privateChats = JSON.parse(localStorage.getItem('private_chats') || '[]');
-let pushData = null, pushTimeout = null;
+const socket = io({
+    reconnection: true,
+    reconnectionAttempts: 10,
+    reconnectionDelay: 1000,
+    timeout: 10000
+});
+
+let currentUser = null;
+let currentToken = null;
+let currentChat = null;
+let currentChatName = '';
+let currentAvatar = null;
+let currentBio = '';
+let currentUsername = '';
+let typingTimeout = null;
+let isChatOpen = false;
+let isRecording = false;
+let mediaRecorder = null;
+let audioChunks = [];
+let unreadData = {};
+let privateChats = JSON.parse(localStorage.getItem('private_chats') || '[]');
+let users = {};
+let pushData = null;
+let pushTimeout = null;
+let loginTimeout = null;
+let isLoginProcessing = false;
 
 const $ = id => document.getElementById(id);
-const chatList = $('chatList'), usersList = $('usersList'), postsList = $('postsList');
-const settingsContent = $('settingsContent'), totalBadge = $('totalBadge');
-const chatWindow = $('chatWindow'), messagesContainer = $('messagesContainer');
-const chatTitle = $('chatTitle'), msgInput = $('msgInput'), typingIndicator = $('typingIndicator');
+const chatList = $('chatList');
+const usersList = $('usersList');
+const postsList = $('postsList');
+const settingsContent = $('settingsContent');
+const totalBadge = $('totalBadge');
+const chatWindow = $('chatWindow');
+const messagesContainer = $('messagesContainer');
+const chatTitle = $('chatTitle');
+const msgInput = $('msgInput');
+const typingIndicator = $('typingIndicator');
 const storiesRow = $('storiesRow');
 
 // ============================================================
@@ -1182,8 +2042,9 @@ const translations = {
         success: 'Успех',
         username: 'Юзернейм',
         password: 'Пароль',
-        usernamePlaceholder: 'Юзернейм (латиница, 3-20 символов)',
-        passwordPlaceholder: 'Пароль (мин. 4)',
+        wait: 'Подождите...',
+        timeout: 'Сервер не отвечает. Попробуйте позже.',
+        userNotFound: 'Пользователь не найден. Создать нового?'
     },
     en: {
         appName: 'DirectMe',
@@ -1236,8 +2097,9 @@ const translations = {
         success: 'Success',
         username: 'Username',
         password: 'Password',
-        usernamePlaceholder: 'Username (latin, 3-20 chars)',
-        passwordPlaceholder: 'Password (min 4)',
+        wait: 'Wait...',
+        timeout: 'Server not responding. Try later.',
+        userNotFound: 'User not found. Create new?'
     }
 };
 
@@ -1262,17 +2124,14 @@ function updateLanguageUI() {
     document.getElementById('msgInput').placeholder = t('message');
     document.getElementById('headerTitle').textContent = t('appName');
     
-    // Если есть открытый чат
     if (isChatOpen && currentChatName) {
         chatTitle.textContent = currentChatName;
     }
     
-    // Обновляем настройки, если они открыты
     if (document.getElementById('pageSettings').classList.contains('active')) {
         renderSettings();
     }
     
-    // Обновляем пустые состояния
     updateEmptyStates();
 }
 
@@ -1289,7 +2148,7 @@ function updateEmptyStates() {
 }
 
 // ============================================================
-//  ОСТАЛЬНЫЕ ФУНКЦИИ
+//  ТЕМА
 // ============================================================
 function toggleTheme() {
     document.body.classList.toggle('light');
@@ -1307,27 +2166,62 @@ function loadTheme() {
     }
 }
 
+// ============================================================
+//  УВЕДОМЛЕНИЯ
+// ============================================================
 function showPush(from, content, chatId) {
-    const el = $('pushNotification'), avatar = $('pnAvatar'), name = $('pnName'), text = $('pnText');
-    const user = Object.values(users).find(u => u.name === from);
-    avatar.innerHTML = (user && user.avatar) ? `<img src="${user.avatar}">` : from[0];
+    const el = $('pushNotification');
+    const avatar = $('pnAvatar');
+    const name = $('pnName');
+    const text = $('pnText');
+    
+    const user = users[from] || {};
+    avatar.innerHTML = user.avatar ? `<img src="${user.avatar}">` : from[0];
     name.textContent = from;
     text.textContent = content;
     pushData = { chatId, from };
     el.classList.add('show');
+    
     clearTimeout(pushTimeout);
     pushTimeout = setTimeout(closePush, 5000);
 }
 
-function closePush() { const el = $('pushNotification'); if (el) el.classList.remove('show'); pushData = null; }
-function openChatFromPush() { if (pushData) { closePush(); openPrivateChat(pushData.chatId, pushData.from); } }
+function closePush() {
+    const el = $('pushNotification');
+    if (el) el.classList.remove('show');
+    pushData = null;
+}
 
-// ===== ВХОД / РЕГИСТРАЦИЯ (ГАРАНТИРОВАННО РАБОТАЕТ) =====
+function openChatFromPush() {
+    if (pushData) {
+        closePush();
+        openPrivateChat(pushData.chatId, pushData.from);
+    }
+}
+
+function showToast(msg) {
+    const el = document.createElement('div');
+    el.className = 'toast';
+    el.textContent = msg;
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 3000);
+}
+
+// ============================================================
+//  АУТЕНТИФИКАЦИЯ
+// ============================================================
 function doLogin() {
-    console.log('🔵 Кнопка нажата!');
-    var username = document.getElementById('regUsername').value.trim().toLowerCase();
-    var password = document.getElementById('regPassword').value.trim();
-
+    console.log('🔵 Login button clicked');
+    
+    if (isLoginProcessing) {
+        showToast('⏳ ' + t('wait'));
+        return;
+    }
+    
+    const username = document.getElementById('regUsername').value.trim().toLowerCase();
+    const password = document.getElementById('regPassword').value.trim();
+    
+    // Валидация
     if (!username || username.length < 3 || username.length > 20) {
         showToast(t('username') + ' 3-20 ' + (currentLang === 'ru' ? 'символов' : 'chars'));
         return;
@@ -1340,141 +2234,241 @@ function doLogin() {
         showToast(t('password') + ' ' + (currentLang === 'ru' ? 'минимум 4 символа' : 'min 4 chars'));
         return;
     }
-
-    socket.emit('login', { username: username, password: password });
     
-    var answered = false;
-    socket.once('login_success', function(data) {
-        answered = true;
-        console.log('✅ Вход выполнен!');
+    isLoginProcessing = true;
+    const loginBtn = document.getElementById('loginBtn');
+    loginBtn.disabled = true;
+    loginBtn.textContent = '⏳ ' + t('wait');
+    
+    // Удаляем старые обработчики
+    socket.off('login_success');
+    socket.off('error');
+    socket.off('connected');
+    
+    let handled = false;
+    
+    // Обработчик успеха
+    socket.on('login_success', function(data) {
+        if (handled) return;
+        handled = true;
+        console.log('✅ Login successful:', data);
+        
         currentUser = data.name;
         currentToken = data.token;
         currentAvatar = data.avatar;
         currentUsername = data.username || data.name;
         currentBio = data.bio || '';
+        
         localStorage.setItem('directme_token', data.token);
         localStorage.setItem('directme_user', data.name);
+        
         enterApp();
+        loginBtn.disabled = false;
+        loginBtn.textContent = t('loginBtn');
+        isLoginProcessing = false;
+        clearTimeout(loginTimeout);
     });
     
-    socket.once('error', function(data) {
-        answered = true;
-        console.log('❌ Ошибка:', data.message);
+    // Обработчик ошибок
+    socket.on('error', function(data) {
+        if (handled) return;
+        handled = true;
+        console.log('❌ Login error:', data.message);
+        
         if (data.message === 'Пользователь не найден' || data.message === 'User not found') {
-            if (confirm(currentLang === 'ru' ? 'Пользователь не найден. Создать нового?' : 'User not found. Create new?')) {
-                socket.emit('register', { username: username, password: password });
-                socket.once('login_success', function(data2) {
-                    console.log('✅ Аккаунт создан!');
+            if (confirm(t('userNotFound'))) {
+                // Пробуем зарегистрироваться
+                socket.off('login_success');
+                socket.off('error');
+                
+                socket.on('login_success', function(data2) {
+                    if (handled) return;
+                    handled = true;
+                    console.log('✅ Registration successful:', data2);
+                    
                     currentUser = data2.name;
                     currentToken = data2.token;
                     currentAvatar = data2.avatar;
                     currentUsername = data2.username || data2.name;
                     currentBio = data2.bio || '';
+                    
                     localStorage.setItem('directme_token', data2.token);
                     localStorage.setItem('directme_user', data2.name);
+                    
                     enterApp();
+                    loginBtn.disabled = false;
+                    loginBtn.textContent = t('loginBtn');
+                    isLoginProcessing = false;
+                    clearTimeout(loginTimeout);
                 });
+                
+                socket.on('error', function(err) {
+                    if (handled) return;
+                    handled = true;
+                    showToast('❌ ' + err.message);
+                    loginBtn.disabled = false;
+                    loginBtn.textContent = t('loginBtn');
+                    isLoginProcessing = false;
+                    clearTimeout(loginTimeout);
+                });
+                
+                socket.emit('register', { username: username, password: password });
+                return;
+            } else {
+                loginBtn.disabled = false;
+                loginBtn.textContent = t('loginBtn');
+                isLoginProcessing = false;
+                clearTimeout(loginTimeout);
+                return;
             }
         } else {
-            showToast(t('error') + ': ' + data.message);
+            showToast('❌ ' + data.message);
+            loginBtn.disabled = false;
+            loginBtn.textContent = t('loginBtn');
+            isLoginProcessing = false;
+            clearTimeout(loginTimeout);
         }
     });
     
-    setTimeout(function() {
-        if (!answered) {
-            showToast('⏰ ' + (currentLang === 'ru' ? 'Сервер не отвечает. Попробуйте позже.' : 'Server not responding. Try later.'));
+    // Отправляем запрос
+    socket.emit('login', { username: username, password: password });
+    
+    // Таймаут
+    loginTimeout = setTimeout(function() {
+        if (!handled) {
+            handled = true;
+            loginBtn.disabled = false;
+            loginBtn.textContent = t('loginBtn');
+            isLoginProcessing = false;
+            showToast('⏰ ' + t('timeout'));
+            
+            socket.off('login_success');
+            socket.off('error');
         }
-    }, 3000);
+    }, 10000);
 }
 
-// ===== ЗАГРУЗКА КНОПКИ =====
-document.addEventListener('DOMContentLoaded', function() {
-    console.log('📄 Страница загружена!');
-    
-    // Загружаем язык
-    currentLang = localStorage.getItem('directme_lang') || 'ru';
-    updateLanguageUI();
+// ============================================================
+//  ВХОД В ПРИЛОЖЕНИЕ
+// ============================================================
+function enterApp() {
+    console.log('🚀 Entering app...');
+    $('loginScreen').classList.add('hidden');
+    $('nav').style.display = 'flex';
     loadTheme();
+    renderChats();
+    renderUsers();
+    renderSettings();
+    socket.emit('get_posts');
     
-    var btn = document.getElementById('loginBtn');
-    if (btn) {
-        console.log('✅ Кнопка найдена!');
-        btn.addEventListener('click', function(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            doLogin();
-        });
-        console.log('✅ Кнопка привязана!');
-    } else {
-        console.log('❌ Кнопка НЕ найдена!');
+    // Периодические обновления
+    setInterval(() => {
+        if (currentUser) {
+            socket.emit('get_users', { name: currentUser });
+        }
+    }, 30000);
+    
+    setInterval(() => {
+        socket.emit('get_posts');
+    }, 60000);
+    
+    // Загружаем пользователей
+    socket.emit('get_users', { name: currentUser });
+}
+
+// ============================================================
+//  SOCKET EVENTS
+// ============================================================
+socket.on('connect', function() {
+    console.log('✅ Socket connected');
+    
+    // Автовход
+    const savedToken = localStorage.getItem('directme_token');
+    const savedUser = localStorage.getItem('directme_user');
+    if (savedToken && savedUser && !currentUser) {
+        socket.emit('auto_login', { token: savedToken });
     }
 });
 
-function showToast(msg) {
-    const el = document.createElement('div');
-    el.className = 'toast';
-    el.textContent = msg;
-    document.body.appendChild(el);
-    setTimeout(() => el.remove(), 2500);
-}
+socket.on('disconnect', function() {
+    console.log('❌ Socket disconnected');
+    showToast('🔌 ' + (currentLang === 'ru' ? 'Соединение потеряно' : 'Connection lost'));
+});
 
-// ===== SOCKET EVENTS =====
-socket.on('login_success', function(data) {
-    console.log('✅ Вход выполнен (socket)!');
-    currentUser = data.name;
-    currentToken = data.token;
-    currentAvatar = data.avatar;
-    currentUsername = data.username || data.name;
-    currentBio = data.bio || '';
-    localStorage.setItem('directme_token', data.token);
-    localStorage.setItem('directme_user', data.name);
-    enterApp();
+socket.on('connect_error', function(error) {
+    console.error('❌ Connection error:', error);
+    showToast('⚠️ ' + (currentLang === 'ru' ? 'Ошибка соединения' : 'Connection error'));
 });
 
 socket.on('error', function(data) {
-    showToast(t('error') + ': ' + data.message);
+    showToast('❌ ' + data.message);
 });
 
-socket.on('push_notification', (data) => {
+socket.on('push_notification', function(data) {
     showPush(data.from, data.content, data.chat_id);
     if ($('pageUsers').classList.contains('active')) switchPage('chats');
 });
 
-socket.on('new_message', (data) => {
-    if (data.chat === currentChat && isChatOpen) { renderMessage(data.message); scrollToBottom(); }
-    if (data.chat !== currentChat || !isChatOpen) { unreadData[data.chat] = (unreadData[data.chat] || 0) + 1; updateBadge(); }
+socket.on('new_message', function(data) {
+    if (data.chat === currentChat && isChatOpen) {
+        renderMessage(data.message);
+        scrollToBottom();
+    }
+    if (data.chat !== currentChat || !isChatOpen) {
+        unreadData[data.chat] = (unreadData[data.chat] || 0) + 1;
+        updateBadge();
+    }
     renderChats();
 });
 
-socket.on('chat_history', (data) => {
+socket.on('chat_history', function(data) {
     messagesContainer.innerHTML = '';
-    if (data.messages) { data.messages.forEach(m => renderMessage(m)); scrollToBottom(); }
+    if (data.messages) {
+        data.messages.forEach(m => renderMessage(m));
+        scrollToBottom();
+    }
 });
 
-socket.on('typing_status', (data) => {
-    if (data.typing) { typingIndicator.textContent = data.name + ' печатает...'; typingIndicator.classList.add('show'); }
-    else { typingIndicator.classList.remove('show'); }
+socket.on('typing_status', function(data) {
+    if (data.typing) {
+        typingIndicator.textContent = data.name + ' ' + (currentLang === 'ru' ? 'печатает...' : 'is typing...');
+        typingIndicator.classList.add('show');
+    } else {
+        typingIndicator.classList.remove('show');
+    }
 });
 
-socket.on('users_list', (data) => { renderUsersList(data.users); });
-socket.on('private_chat', (data) => { openPrivateChat(data.chat_id, data.user, data.avatar, data.messages); });
+socket.on('users_list', function(data) {
+    if (data.users) {
+        data.users.forEach(u => { users[u.name] = u; });
+        renderUsersList(data.users);
+    }
+});
 
-socket.on('avatar_updated', (data) => {
+socket.on('private_chat', function(data) {
+    openPrivateChat(data.chat_id, data.user, data.avatar, data.messages);
+});
+
+socket.on('avatar_updated', function(data) {
     if (data.name === currentUser) currentAvatar = data.avatar;
-    renderChats(); renderUsers();
+    renderChats();
+    renderUsers();
 });
 
-socket.on('bio_updated', (data) => {
-    if (data.name === currentUser) { currentBio = data.bio; renderSettings(); }
+socket.on('bio_updated', function(data) {
+    if (data.name === currentUser) {
+        currentBio = data.bio;
+        renderSettings();
+    }
 });
 
-socket.on('new_post', (data) => {
+socket.on('new_post', function(data) {
     if ($('pagePosts').classList.contains('active')) {
         postsList.insertAdjacentHTML('afterbegin', renderPost(data.post));
     }
 });
 
-socket.on('posts_list', (data) => {
+socket.on('posts_list', function(data) {
     if (!data.posts || !data.posts.length) {
         postsList.innerHTML = `<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg><h3>${t('noPosts')}</h3><p>${t('noPostsDesc')}</p></div>`;
         return;
@@ -1482,19 +2476,19 @@ socket.on('posts_list', (data) => {
     postsList.innerHTML = data.posts.map(p => renderPost(p)).join('');
 });
 
-socket.on('post_updated', (data) => {
+socket.on('post_updated', function(data) {
     const el = document.getElementById('post-' + data.post.id);
     if (el) el.outerHTML = renderPost(data.post);
 });
 
-socket.on('message_deleted', (data) => {
+socket.on('message_deleted', function(data) {
     if (data.chat === currentChat) {
         const el = document.querySelector(`[data-msg-id="${data.msg_id}"]`);
         if (el) el.remove();
     }
 });
 
-socket.on('message_edited', (data) => {
+socket.on('message_edited', function(data) {
     if (data.chat === currentChat) {
         const el = document.querySelector(`[data-msg-id="${data.message.id}"]`);
         if (el) {
@@ -1504,13 +2498,16 @@ socket.on('message_edited', (data) => {
     }
 });
 
-socket.on('share_link', (data) => {
-    const url = 'https://' + data.url;
-    if (navigator.clipboard) { navigator.clipboard.writeText(url).then(() => showToast(t('copyLink'))); }
-    else { prompt('Link:', url); }
+socket.on('share_link', function(data) {
+    const url = window.location.origin;
+    if (navigator.clipboard) {
+        navigator.clipboard.writeText(url).then(() => showToast(t('copyLink')));
+    } else {
+        prompt('Link:', url);
+    }
 });
 
-socket.on('reaction_updated', (data) => {
+socket.on('reaction_updated', function(data) {
     if (data.chat === currentChat) {
         const el = document.querySelector(`[data-msg-id="${data.msg_id}"]`);
         if (el) {
@@ -1537,23 +2534,12 @@ socket.on('reaction_updated', (data) => {
 });
 
 // ============================================================
-//  ВХОД В ПРИЛОЖЕНИЕ
+//  НАВИГАЦИЯ
 // ============================================================
-function enterApp() {
-    $('loginScreen').classList.add('hidden');
-    $('nav').style.display = 'flex';
-    loadTheme();
-    renderChats();
-    renderUsers();
-    renderSettings();
-    socket.emit('get_posts');
-    setInterval(() => socket.emit('get_users', { name: currentUser }), 30000);
-    setInterval(() => socket.emit('get_posts'), 60000);
-}
-
 function switchPage(page) {
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    
     if (page === 'chats') {
         $('pageChats').classList.add('active');
         document.querySelector('.nav-item:nth-child(1)').classList.add('active');
@@ -1579,24 +2565,36 @@ function switchPage(page) {
         $('headerFab').style.display = 'none';
         if (storiesRow) storiesRow.style.display = 'none';
     }
-    if (isChatOpen) { chatWindow.classList.remove('open'); chatWindow.style.display = 'none'; isChatOpen = false; }
+    
+    if (isChatOpen) {
+        chatWindow.classList.remove('open');
+        chatWindow.style.display = 'none';
+        isChatOpen = false;
+    }
 }
 
+// ============================================================
+//  ЧАТЫ
+// ============================================================
 function renderChats() {
-    if (!privateChats.length) {
+    if (!privateChats || !privateChats.length) {
         chatList.innerHTML = `<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><h3>${t('noChats')}</h3><p>${t('noChatsDesc')}</p></div>`;
         return;
     }
+    
     let html = '';
     privateChats.forEach(c => {
         const ur = unreadData[c.id] || 0;
         const lastMsg = c.lastMsg || t('writeFirst');
-        const username = users[c.name]?.username || c.name;
+        const user = users[c.name] || {};
+        const username = user.username || c.name;
+        const status = user.status || 'offline';
+        
         html += `
             <div class="chat-item" onclick="openPrivateChat('${c.id}', '${c.name}')">
                 <div class="chat-avatar">
                     ${c.avatar ? `<img src="${c.avatar}">` : c.name[0]}
-                    <span class="online-dot ${c.status === 'online' ? '' : 'offline'}"></span>
+                    <span class="online-dot ${status === 'online' ? '' : 'offline'}"></span>
                 </div>
                 <div class="chat-info">
                     <div class="chat-name">${c.name} <span class="chat-username">@${username}</span></div>
@@ -1610,14 +2608,17 @@ function renderChats() {
     updateBadge();
 }
 
-function renderUsers() { socket.emit('get_users', { name: currentUser }); }
+function renderUsers() {
+    socket.emit('get_users', { name: currentUser });
+}
 
-function renderUsersList(users) {
-    if (!users || !users.length) {
+function renderUsersList(usersList) {
+    if (!usersList || !usersList.length) {
         usersList.innerHTML = `<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg><h3>${t('noUsers')}</h3></div>`;
         return;
     }
-    usersList.innerHTML = users.map(u => `
+    
+    document.getElementById('usersList').innerHTML = usersList.map(u => `
         <div class="chat-item" onclick="viewProfile('${u.name}')">
             <div class="chat-avatar">
                 ${u.avatar ? `<img src="${u.avatar}">` : u.name[0]}
@@ -1646,10 +2647,14 @@ function searchUsers() {
 }
 
 function viewProfile(name) {
-    if (name === currentUser) { switchPage('settings'); return; }
-    const user = Object.values(users).find(u => u.name === name);
+    if (name === currentUser) {
+        switchPage('settings');
+        return;
+    }
+    
+    const user = users[name];
     if (!user) return;
-    socket.emit('get_posts');
+    
     const userPosts = Object.values(posts).filter(p => p.author === name);
     const html = `
         <div style="padding:12px;">
@@ -1668,6 +2673,7 @@ function viewProfile(name) {
             </div>
         </div>
     `;
+    
     $('pageChats').innerHTML = html;
     $('pageChats').classList.add('active');
     document.querySelectorAll('.page').forEach(p => { if(p.id !== 'pageChats') p.classList.remove('active'); });
@@ -1693,18 +2699,29 @@ function openPrivateChat(chatId, name, avatar, messages) {
     currentChat = chatId;
     currentChatName = name;
     isChatOpen = true;
+    
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     chatWindow.classList.add('open');
     chatWindow.style.display = 'flex';
     chatTitle.textContent = name;
     messagesContainer.innerHTML = '';
-    if (messages) { messages.forEach(m => renderMessage(m)); scrollToBottom(); }
+    
+    if (messages) {
+        messages.forEach(m => renderMessage(m));
+        scrollToBottom();
+    }
+    
     const exists = privateChats.some(c => c.id === chatId);
     if (!exists) {
         privateChats.push({ id: chatId, name, avatar: avatar || name[0], lastMsg: '' });
         localStorage.setItem('private_chats', JSON.stringify(privateChats));
     }
-    if (unreadData[chatId]) { unreadData[chatId] = 0; updateBadge(); }
+    
+    if (unreadData[chatId]) {
+        unreadData[chatId] = 0;
+        updateBadge();
+    }
+    
     socket.emit('join_chat', { chat: chatId, name: currentUser });
     msgInput.focus();
     renderChats();
@@ -1728,20 +2745,36 @@ function deleteChat() {
     closeChat();
 }
 
+// ============================================================
+//  СООБЩЕНИЯ
+// ============================================================
 function sendMessage() {
     const text = msgInput.value.trim();
     if (!text || !currentChat) return;
-    socket.emit('send_message', { name: currentUser, chat: currentChat, type: 'text', content: text });
+    
+    socket.emit('send_message', {
+        name: currentUser,
+        chat: currentChat,
+        type: 'text',
+        content: text
+    });
+    
     msgInput.value = '';
     socket.emit('typing', { chat: currentChat, name: currentUser, typing: false });
+    
     const chat = privateChats.find(c => c.id === currentChat);
-    if (chat) { chat.lastMsg = text; localStorage.setItem('private_chats', JSON.stringify(privateChats)); }
+    if (chat) {
+        chat.lastMsg = text;
+        localStorage.setItem('private_chats', JSON.stringify(privateChats));
+    }
 }
 
 function handleTyping() {
     if (typingTimeout) clearTimeout(typingTimeout);
     socket.emit('typing', { chat: currentChat, name: currentUser, typing: true });
-    typingTimeout = setTimeout(() => { socket.emit('typing', { chat: currentChat, name: currentUser, typing: false }); }, 1500);
+    typingTimeout = setTimeout(() => {
+        socket.emit('typing', { chat: currentChat, name: currentUser, typing: false });
+    }, 1500);
 }
 
 function renderMessage(msg) {
@@ -1749,15 +2782,20 @@ function renderMessage(msg) {
     const div = document.createElement('div');
     div.className = 'msg' + (isSelf ? ' self' : '');
     div.dataset.msgId = msg.id;
+    
     let content = msg.content;
-    if (msg.type === 'image') content = `<img src="${msg.content}" onclick="openMedia('${msg.content}','image')">`;
-    else if (msg.type === 'video') content = `<video src="${msg.content}" controls></video>`;
-    else if (msg.type === 'voice') content = `<audio src="${msg.content}" controls></audio>`;
-    else {
+    if (msg.type === 'image') {
+        content = `<img src="${msg.content}" onclick="openMedia('${msg.content}','image')">`;
+    } else if (msg.type === 'video') {
+        content = `<video src="${msg.content}" controls></video>`;
+    } else if (msg.type === 'voice') {
+        content = `<audio src="${msg.content}" controls></audio>`;
+    } else {
         content = msg.content.replace(/</g,'&lt;').replace(/>/g,'&gt;');
         content = content.replace(/#(\w+)/g, '<span style="color:var(--primary-light);cursor:pointer;" onclick="searchHashtag(\'$1\')">#$1</span>');
         content = content.replace(/@(\w+)/g, '<span style="color:var(--primary);cursor:pointer;" onclick="viewProfile(\'$1\')">@$1</span>');
     }
+    
     const avatar = msg.avatar ? `<img src="${msg.avatar}">` : msg.name[0];
     const actions = isSelf ? `
         <div class="msg-actions">
@@ -1771,10 +2809,12 @@ function renderMessage(msg) {
             <button onclick="forwardMessage('${msg.id}')">➡</button>
         </div>
     `;
+    
     let replyHtml = '';
     if (msg.reply_to) {
         replyHtml = `<div class="msg-reply-indicator">↳ ${msg.reply_to.name}: ${msg.reply_to.content}</div>`;
     }
+    
     let reactionsHtml = '';
     if (msg.reactions && Object.keys(msg.reactions).length > 0) {
         const counts = {};
@@ -1787,9 +2827,11 @@ function renderMessage(msg) {
         }
         reactionsHtml += '</div>';
     }
+    
     const reactionBtns = ['❤️', '🔥', '👍', '😂', '😮'].map(e =>
         `<span onclick="addReaction('${msg.id}','${e}')" style="cursor:pointer;padding:0 3px;font-size:13px;">${e}</span>`
     ).join('');
+    
     div.innerHTML = `
         <div class="msg-avatar">${avatar}</div>
         <div>
@@ -1801,55 +2843,98 @@ function renderMessage(msg) {
             ${actions}
         </div>
     `;
+    
     messagesContainer.appendChild(div);
 }
 
 function deleteMessage(msgId) {
     if (!confirm(t('delete') + '?')) return;
-    socket.emit('delete_message', { chat: currentChat, msg_id: msgId, name: currentUser });
+    socket.emit('delete_message', {
+        chat: currentChat,
+        msg_id: msgId,
+        name: currentUser
+    });
 }
 
 function editMessage(msgId) {
     const newText = prompt(t('edit') + ':');
     if (newText?.trim()) {
-        socket.emit('edit_message', { chat: currentChat, msg_id: msgId, name: currentUser, content: newText.trim() });
+        socket.emit('edit_message', {
+            chat: currentChat,
+            msg_id: msgId,
+            name: currentUser,
+            content: newText.trim()
+        });
     }
 }
 
 function pinMessage(msgId) {
-    socket.emit('pin_message', { chat: currentChat, msg_id: msgId, name: currentUser });
+    socket.emit('pin_message', {
+        chat: currentChat,
+        msg_id: msgId,
+        name: currentUser
+    });
 }
 
 function replyToMessage(msgId, name, content) {
     const replyText = prompt(t('reply') + ' ' + name + ': ' + content);
     if (replyText?.trim()) {
-        socket.emit('reply_message', { chat: currentChat, msg_id: msgId, name: currentUser, reply: replyText.trim() });
+        socket.emit('reply_message', {
+            chat: currentChat,
+            msg_id: msgId,
+            name: currentUser,
+            reply: replyText.trim()
+        });
     }
 }
 
 function forwardMessage(msgId) {
     const target = prompt(t('forward') + ':');
     if (target && target.trim() && target !== currentUser) {
-        socket.emit('forward_message', { chat: currentChat, msg_id: msgId, from: currentUser, to: target.trim() });
+        socket.emit('forward_message', {
+            chat: currentChat,
+            msg_id: msgId,
+            name: currentUser,
+            to: target.trim()
+        });
     }
 }
 
 function addReaction(msgId, reaction) {
-    socket.emit('message_reaction', { chat: currentChat, msg_id: msgId, name: currentUser, reaction });
+    socket.emit('message_reaction', {
+        chat: currentChat,
+        msg_id: msgId,
+        name: currentUser,
+        reaction
+    });
 }
 
 function toggleReaction(msgId, reaction) {
-    socket.emit('message_reaction', { chat: currentChat, msg_id: msgId, name: currentUser, reaction });
+    socket.emit('message_reaction', {
+        chat: currentChat,
+        msg_id: msgId,
+        name: currentUser,
+        reaction
+    });
 }
 
-function scrollToBottom() { setTimeout(() => messagesContainer.scrollTop = messagesContainer.scrollHeight, 50); }
+function scrollToBottom() {
+    setTimeout(() => messagesContainer.scrollTop = messagesContainer.scrollHeight, 50);
+}
 
 function updateBadge() {
-    const total = Object.values(unreadData).reduce((a,b) => a + b, 0);
-    if (total > 0) { totalBadge.textContent = total; totalBadge.style.display = 'flex'; }
-    else { totalBadge.style.display = 'none'; }
+    const total = Object.values(unreadData).reduce((a, b) => a + b, 0);
+    if (total > 0) {
+        totalBadge.textContent = total;
+        totalBadge.style.display = 'flex';
+    } else {
+        totalBadge.style.display = 'none';
+    }
 }
 
+// ============================================================
+//  ГОЛОСОВЫЕ СООБЩЕНИЯ
+// ============================================================
 function toggleRecording() {
     if (isRecording) {
         if (mediaRecorder) mediaRecorder.stop();
@@ -1857,26 +2942,39 @@ function toggleRecording() {
         $('recordBtn').classList.remove('recording');
         return;
     }
-    if (!currentChat) { showToast(t('error')); return; }
+    
+    if (!currentChat) {
+        showToast(t('error'));
+        return;
+    }
+    
     navigator.mediaDevices.getUserMedia({ audio: true })
         .then(stream => {
             mediaRecorder = new MediaRecorder(stream);
             audioChunks = [];
+            
             mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
             mediaRecorder.onstop = () => {
                 const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
                 const reader = new FileReader();
                 reader.onload = () => {
-                    socket.emit('send_message', { name: currentUser, chat: currentChat, type: 'voice', content: reader.result });
+                    socket.emit('send_message', {
+                        name: currentUser,
+                        chat: currentChat,
+                        type: 'voice',
+                        content: reader.result
+                    });
                 };
                 reader.readAsDataURL(audioBlob);
                 audioChunks = [];
                 stream.getTracks().forEach(t => t.stop());
             };
+            
             mediaRecorder.start();
             isRecording = true;
             $('recordBtn').classList.add('recording');
             showToast('⏺ ' + t('recording') + ' 30 ' + (currentLang === 'ru' ? 'сек' : 'sec'));
+            
             setTimeout(() => {
                 if (isRecording && mediaRecorder) {
                     mediaRecorder.stop();
@@ -1888,9 +2986,13 @@ function toggleRecording() {
         .catch(() => showToast(t('error')));
 }
 
+// ============================================================
+//  ФАЙЛЫ И МЕДИА
+// ============================================================
 function handleFile(e) {
     const file = e.target.files[0];
     if (!file) return;
+    
     const reader = new FileReader();
     reader.onload = (ev) => {
         socket.emit('send_message', {
@@ -1904,11 +3006,14 @@ function handleFile(e) {
     e.target.value = '';
 }
 
-function createPost() { $('postInput').click(); }
+function createPost() {
+    $('postInput').click();
+}
 
 function handlePost(e) {
     const file = e.target.files[0];
     if (!file) return;
+    
     const caption = prompt(t('caption')) || '';
     const reader = new FileReader();
     reader.onload = (ev) => {
@@ -1924,6 +3029,48 @@ function handlePost(e) {
     e.target.value = '';
 }
 
+function handleAvatar(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+        currentAvatar = ev.target.result;
+        socket.emit('update_avatar', {
+            name: currentUser,
+            avatar: ev.target.result
+        });
+        renderSettings();
+        showToast(t('success'));
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+}
+
+function openMedia(src, type) {
+    const viewer = $('mediaViewer');
+    viewer.classList.add('open');
+    if (type === 'image') {
+        $('mediaImg').src = src;
+        $('mediaImg').style.display = 'block';
+        $('mediaVideo').style.display = 'none';
+        $('mediaVideo').pause();
+    } else {
+        $('mediaVideo').src = src;
+        $('mediaVideo').style.display = 'block';
+        $('mediaImg').style.display = 'none';
+        $('mediaVideo').play();
+    }
+}
+
+function closeMedia() {
+    $('mediaViewer').classList.remove('open');
+    $('mediaVideo').pause();
+}
+
+// ============================================================
+//  ПОСТЫ
+// ============================================================
 function renderPost(p) {
     const isLiked = p.likes?.includes(currentUser);
     const isSaved = p.saved_by?.includes(currentUser);
@@ -1933,6 +3080,7 @@ function renderPost(p) {
     const comments = p.comments || [];
     const hasComments = comments.length > 0;
     const username = users[p.author]?.username || p.author;
+    
     return `
         <div class="post-card" id="post-${p.id}">
             <div class="post-header">
@@ -1986,22 +3134,41 @@ function toggleComments(postId) {
     if (wrap) wrap.classList.toggle('open');
 }
 
-function likePost(postId) { socket.emit('like_post', { post_id: postId, name: currentUser }); }
-function savePost(postId) { socket.emit('save_post', { post_id: postId, name: currentUser }); }
-function repostPost(postId) { socket.emit('repost_post', { post_id: postId, name: currentUser }); }
+function likePost(postId) {
+    socket.emit('like_post', { post_id: postId, name: currentUser });
+}
+
+function savePost(postId) {
+    socket.emit('save_post', { post_id: postId, name: currentUser });
+}
+
+function repostPost(postId) {
+    socket.emit('repost_post', { post_id: postId, name: currentUser });
+}
 
 function sendComment(postId) {
     const input = document.getElementById('comment-' + postId);
     const text = input.value.trim();
     if (!text) return;
-    socket.emit('comment_post', { post_id: postId, name: currentUser, comment: text });
+    socket.emit('comment_post', {
+        post_id: postId,
+        name: currentUser,
+        comment: text
+    });
     input.value = '';
 }
 
 function deletePost(postId) {
     if (!confirm(t('delete') + '?')) return;
-    fetch('/delete_post', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pid: postId, n: currentUser }) });
-    setTimeout(() => socket.emit('get_posts'), 500);
+    fetch('/api/delete_post', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pid: postId })
+    }).then(() => {
+        socket.emit('get_posts');
+    }).catch(() => {
+        showToast(t('error'));
+    });
 }
 
 function searchHashtag(tag) {
@@ -2016,6 +3183,9 @@ function searchHashtag(tag) {
     });
 }
 
+// ============================================================
+//  НАСТРОЙКИ
+// ============================================================
 function renderSettings() {
     const avatar = currentAvatar ? `<img src="${currentAvatar}">` : (currentUser ? currentUser[0] : '?');
     settingsContent.innerHTML = `
@@ -2046,32 +3216,29 @@ function toggleLanguage() {
 
 function editBio() {
     const bio = prompt(t('editBio') + ':', currentBio || '');
-    if (bio !== null) { currentBio = bio; socket.emit('update_bio', { name: currentUser, bio }); renderSettings(); }
+    if (bio !== null) {
+        currentBio = bio;
+        socket.emit('update_bio', { name: currentUser, bio });
+        renderSettings();
+    }
 }
 
 function editProfile() {
     const newName = prompt(t('editProfile') + ' (' + t('username') + '):', currentUser);
     if (newName && newName.trim() && newName !== currentUser) {
-        socket.emit('update_profile', { name: currentUser, new_name: newName.trim() });
+        socket.emit('update_profile', {
+            name: currentUser,
+            new_name: newName.trim()
+        });
     }
+    
     const newUsername = prompt(t('editProfile') + ' (@' + t('username') + '):', currentUsername);
     if (newUsername && newUsername.trim() && newUsername !== currentUsername) {
-        socket.emit('update_profile', { name: currentUser, new_username: newUsername.trim().toLowerCase() });
+        socket.emit('update_profile', {
+            name: currentUser,
+            new_username: newUsername.trim().toLowerCase()
+        });
     }
-}
-
-function handleAvatar(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-        currentAvatar = ev.target.result;
-        socket.emit('update_avatar', { name: currentUser, avatar: ev.target.result });
-        renderSettings();
-        showToast(t('success'));
-    };
-    reader.readAsDataURL(file);
-    e.target.value = '';
 }
 
 function logout() {
@@ -2082,46 +3249,55 @@ function logout() {
     location.reload();
 }
 
-function shareApp() { socket.emit('share_link'); }
+function shareApp() {
+    socket.emit('share_link');
+}
 
-function openMedia(src, type) {
-    const viewer = $('mediaViewer');
-    viewer.classList.add('open');
-    if (type === 'image') {
-        $('mediaImg').src = src;
-        $('mediaImg').style.display = 'block';
-        $('mediaVideo').style.display = 'none';
-        $('mediaVideo').pause();
+// ============================================================
+//  ЗАГРУЗКА
+// ============================================================
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('📄 Page loaded');
+    
+    // Загружаем язык
+    currentLang = localStorage.getItem('directme_lang') || 'ru';
+    updateLanguageUI();
+    loadTheme();
+    
+    // Привязываем кнопку входа
+    const loginBtn = document.getElementById('loginBtn');
+    if (loginBtn) {
+        console.log('✅ Login button found');
+        loginBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            doLogin();
+        });
     } else {
-        $('mediaVideo').src = src;
-        $('mediaVideo').style.display = 'block';
-        $('mediaImg').style.display = 'none';
-        $('mediaVideo').play();
+        console.error('❌ Login button not found!');
     }
-}
-
-function closeMedia() {
-    $('mediaViewer').classList.remove('open');
-    $('mediaVideo').pause();
-}
-
-const savedToken = localStorage.getItem('directme_token');
-const savedUser = localStorage.getItem('directme_user');
-if (savedToken && savedUser) { socket.emit('auto_login', { token: savedToken }); }
-
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-        if ($('mediaViewer').classList.contains('open')) closeMedia();
-        else if (isChatOpen) closeChat();
+    
+    // Автовход
+    const savedToken = localStorage.getItem('directme_token');
+    const savedUser = localStorage.getItem('directme_user');
+    if (savedToken && savedUser) {
+        socket.emit('auto_login', { token: savedToken });
     }
+    
+    // Закрытие медиа по Escape
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            if ($('mediaViewer').classList.contains('open')) closeMedia();
+            else if (isChatOpen) closeChat();
+        }
+    });
 });
 
-console.log('💬 DirectMe загружен!');
+console.log('💬 DirectMe loaded successfully!');
 </script>
 </body>
 </html>
 '''
-
 
 # ============================================================
 #  ЗАПУСК
