@@ -118,7 +118,7 @@ def delete_post():
     return {'ok': False}, 403
 
 # ============================================================
-#  WEBSOCKET: АУТЕНТИФИКАЦИЯ (ТОЛЬКО ЮЗЕРНЕЙМ + ПАРОЛЬ)
+#  WEBSOCKET: АУТЕНТИФИКАЦИЯ
 # ============================================================
 @socketio.on('connect')
 def handle_connect():
@@ -1069,20 +1069,20 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
     <div class="nav" id="nav" style="display:none">
         <div class="nav-item active" onclick="switchPage('chats')">
             <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-            <span class="label">Чаты</span>
+            <span class="label" id="navChats">Чаты</span>
             <span class="badge" id="totalBadge" style="display:none">0</span>
         </div>
         <div class="nav-item" onclick="switchPage('users')">
             <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-            <span class="label">Люди</span>
+            <span class="label" id="navUsers">Люди</span>
         </div>
         <div class="nav-item" onclick="switchPage('posts')">
             <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-            <span class="label">Посты</span>
+            <span class="label" id="navPosts">Посты</span>
         </div>
         <div class="nav-item" onclick="switchPage('settings')">
             <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 1v4"/><path d="M12 19v4"/><path d="M4.22 4.22l2.83 2.83"/><path d="M16.95 16.95l2.83 2.83"/><path d="M1 12h4"/><path d="M19 12h4"/><path d="M4.22 19.78l2.83-2.83"/><path d="M16.95 7.05l2.83-2.83"/></svg>
-            <span class="label">Настройки</span>
+            <span class="label" id="navSettings">Настройки</span>
         </div>
     </div>
 </div>
@@ -1099,17 +1099,17 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
         <div id="loginStep1">
             <svg class="login-logo" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             <h1>DirectMe</h1>
-            <p>Введите юзернейм и пароль</p>
+            <p id="loginDesc">Введите юзернейм и пароль</p>
             <input class="form-input" id="regUsername" placeholder="Юзернейм (латиница, 3-20 символов)">
             <input class="form-input" id="regPassword" placeholder="Пароль (мин. 4)" type="password">
-            <button class="form-btn" type="button" id="loginBtn">Войти / Зарегистрироваться</button>
+            <button class="form-btn" id="loginBtn" type="button">Войти / Зарегистрироваться</button>
         </div>
     </div>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.min.js"></script>
 <script>
 // ============================================================
-//  ПОЛНЫЙ JAVASCRIPT
+//  ПОЛНЫЙ JAVASCRIPT + ПЕРЕКЛЮЧАТЕЛЬ ЯЗЫКА
 // ============================================================
 const socket = io();
 let currentUser = null, currentToken = null, currentChat = null, currentChatName = '';
@@ -1125,11 +1125,177 @@ const chatWindow = $('chatWindow'), messagesContainer = $('messagesContainer');
 const chatTitle = $('chatTitle'), msgInput = $('msgInput'), typingIndicator = $('typingIndicator');
 const storiesRow = $('storiesRow');
 
+// ============================================================
+//  ПЕРЕКЛЮЧАТЕЛЬ ЯЗЫКА
+// ============================================================
+let currentLang = localStorage.getItem('directme_lang') || 'ru';
+
+const translations = {
+    ru: {
+        appName: 'DirectMe',
+        chats: 'Чаты',
+        users: 'Люди',
+        posts: 'Посты',
+        settings: 'Настройки',
+        loginDesc: 'Введите юзернейм и пароль',
+        loginBtn: 'Войти / Зарегистрироваться',
+        search: 'Поиск по имени или юзернейму...',
+        noChats: 'Нет чатов',
+        noChatsDesc: 'Найдите людей в разделе "Люди"',
+        noUsers: 'Нет пользователей',
+        noPosts: 'Нет постов',
+        noPostsDesc: 'Создайте первый пост!',
+        profile: 'Профиль',
+        editBio: 'Редактировать описание',
+        editProfile: 'Редактировать профиль',
+        share: 'Поделиться',
+        logout: 'Выйти',
+        theme: 'Тема',
+        dark: 'Темная',
+        light: 'Светлая',
+        language: 'Язык',
+        online: 'В сети',
+        offline: 'Не в сети',
+        noDescription: 'Нет описания',
+        writeFirst: 'Напишите первым...',
+        message: 'Сообщение...',
+        reply: 'Ответить',
+        forward: 'Переслать',
+        delete: 'Удалить',
+        edit: 'Редактировать',
+        pin: 'Закрепить',
+        pinned: 'Закреплено',
+        voice: 'Голосовое сообщение',
+        recording: 'Запись...',
+        send: 'Отправить',
+        addPost: 'Добавить пост',
+        caption: 'Описание:',
+        postPublished: 'Пост опубликован!',
+        comment: 'Написать комментарий...',
+        save: 'Сохранить',
+        repost: 'Репостнуть',
+        block: 'Заблокировать',
+        unblock: 'Разблокировать',
+        report: 'Пожаловаться',
+        copyLink: 'Ссылка скопирована!',
+        error: 'Ошибка',
+        success: 'Успех',
+        username: 'Юзернейм',
+        password: 'Пароль',
+        usernamePlaceholder: 'Юзернейм (латиница, 3-20 символов)',
+        passwordPlaceholder: 'Пароль (мин. 4)',
+    },
+    en: {
+        appName: 'DirectMe',
+        chats: 'Chats',
+        users: 'People',
+        posts: 'Posts',
+        settings: 'Settings',
+        loginDesc: 'Enter username and password',
+        loginBtn: 'Login / Register',
+        search: 'Search by name or username...',
+        noChats: 'No chats',
+        noChatsDesc: 'Find people in the "People" section',
+        noUsers: 'No users',
+        noPosts: 'No posts',
+        noPostsDesc: 'Create your first post!',
+        profile: 'Profile',
+        editBio: 'Edit bio',
+        editProfile: 'Edit profile',
+        share: 'Share',
+        logout: 'Logout',
+        theme: 'Theme',
+        dark: 'Dark',
+        light: 'Light',
+        language: 'Language',
+        online: 'Online',
+        offline: 'Offline',
+        noDescription: 'No description',
+        writeFirst: 'Write first...',
+        message: 'Message...',
+        reply: 'Reply',
+        forward: 'Forward',
+        delete: 'Delete',
+        edit: 'Edit',
+        pin: 'Pin',
+        pinned: 'Pinned',
+        voice: 'Voice message',
+        recording: 'Recording...',
+        send: 'Send',
+        addPost: 'Add post',
+        caption: 'Caption:',
+        postPublished: 'Post published!',
+        comment: 'Write a comment...',
+        save: 'Save',
+        repost: 'Repost',
+        block: 'Block',
+        unblock: 'Unblock',
+        report: 'Report',
+        copyLink: 'Link copied!',
+        error: 'Error',
+        success: 'Success',
+        username: 'Username',
+        password: 'Password',
+        usernamePlaceholder: 'Username (latin, 3-20 chars)',
+        passwordPlaceholder: 'Password (min 4)',
+    }
+};
+
+function t(key) {
+    return translations[currentLang][key] || key;
+}
+
+function setLanguage(lang) {
+    currentLang = lang;
+    localStorage.setItem('directme_lang', lang);
+    updateLanguageUI();
+}
+
+function updateLanguageUI() {
+    document.getElementById('navChats').textContent = t('chats');
+    document.getElementById('navUsers').textContent = t('users');
+    document.getElementById('navPosts').textContent = t('posts');
+    document.getElementById('navSettings').textContent = t('settings');
+    document.getElementById('loginDesc').textContent = t('loginDesc');
+    document.getElementById('loginBtn').textContent = t('loginBtn');
+    document.getElementById('searchUsers').placeholder = t('search');
+    document.getElementById('msgInput').placeholder = t('message');
+    document.getElementById('headerTitle').textContent = t('appName');
+    
+    // Если есть открытый чат
+    if (isChatOpen && currentChatName) {
+        chatTitle.textContent = currentChatName;
+    }
+    
+    // Обновляем настройки, если они открыты
+    if (document.getElementById('pageSettings').classList.contains('active')) {
+        renderSettings();
+    }
+    
+    // Обновляем пустые состояния
+    updateEmptyStates();
+}
+
+function updateEmptyStates() {
+    if (chatList && chatList.innerHTML.includes('Нет чатов') || chatList.innerHTML.includes('No chats')) {
+        chatList.innerHTML = `<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><h3>${t('noChats')}</h3><p>${t('noChatsDesc')}</p></div>`;
+    }
+    if (usersList && usersList.innerHTML.includes('Нет пользователей') || usersList.innerHTML.includes('No users')) {
+        usersList.innerHTML = `<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg><h3>${t('noUsers')}</h3></div>`;
+    }
+    if (postsList && postsList.innerHTML.includes('Нет постов') || postsList.innerHTML.includes('No posts')) {
+        postsList.innerHTML = `<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg><h3>${t('noPosts')}</h3><p>${t('noPostsDesc')}</p></div>`;
+    }
+}
+
+// ============================================================
+//  ОСТАЛЬНЫЕ ФУНКЦИИ
+// ============================================================
 function toggleTheme() {
     document.body.classList.toggle('light');
     const isLight = document.body.classList.contains('light');
     const themeLabel = document.getElementById('themeLabel');
-    if (themeLabel) themeLabel.textContent = isLight ? 'Светлая' : 'Темная';
+    if (themeLabel) themeLabel.textContent = isLight ? t('light') : t('dark');
     localStorage.setItem('directme_theme', isLight ? 'light' : 'dark');
 }
 
@@ -1137,7 +1303,7 @@ function loadTheme() {
     if (localStorage.getItem('directme_theme') === 'light') {
         document.body.classList.add('light');
         const themeLabel = document.getElementById('themeLabel');
-        if (themeLabel) themeLabel.textContent = 'Светлая';
+        if (themeLabel) themeLabel.textContent = t('light');
     }
 }
 
@@ -1156,35 +1322,93 @@ function showPush(from, content, chatId) {
 function closePush() { const el = $('pushNotification'); if (el) el.classList.remove('show'); pushData = null; }
 function openChatFromPush() { if (pushData) { closePush(); openPrivateChat(pushData.chatId, pushData.from); } }
 
-function loginOrRegister() {
+// ===== ВХОД / РЕГИСТРАЦИЯ (ГАРАНТИРОВАННО РАБОТАЕТ) =====
+function doLogin() {
+    console.log('🔵 Кнопка нажата!');
     var username = document.getElementById('regUsername').value.trim().toLowerCase();
     var password = document.getElementById('regPassword').value.trim();
 
     if (!username || username.length < 3 || username.length > 20) {
-        showToast('Юзернейм 3-20 символов (латиница, цифры, _)');
+        showToast(t('username') + ' 3-20 ' + (currentLang === 'ru' ? 'символов' : 'chars'));
         return;
     }
     if (!/^[a-zA-Z0-9_]+$/.test(username)) {
-        showToast('Юзернейм: только латиница, цифры, _');
+        showToast(t('username') + ': ' + (currentLang === 'ru' ? 'только латиница, цифры, _' : 'latin, numbers, _'));
         return;
     }
     if (password.length < 4) {
-        showToast('Пароль минимум 4 символа');
+        showToast(t('password') + ' ' + (currentLang === 'ru' ? 'минимум 4 символа' : 'min 4 chars'));
         return;
     }
 
-    // Пытаемся войти
     socket.emit('login', { username: username, password: password });
     
-    // Если пользователь не существует — создаём
-    var registered = false;
-    socket.once('login_success', function() { registered = true; });
+    var answered = false;
+    socket.once('login_success', function(data) {
+        answered = true;
+        console.log('✅ Вход выполнен!');
+        currentUser = data.name;
+        currentToken = data.token;
+        currentAvatar = data.avatar;
+        currentUsername = data.username || data.name;
+        currentBio = data.bio || '';
+        localStorage.setItem('directme_token', data.token);
+        localStorage.setItem('directme_user', data.name);
+        enterApp();
+    });
+    
     socket.once('error', function(data) {
-        if (data.message === 'Пользователь не найден' && !registered) {
-            socket.emit('register', { username: username, password: password });
+        answered = true;
+        console.log('❌ Ошибка:', data.message);
+        if (data.message === 'Пользователь не найден' || data.message === 'User not found') {
+            if (confirm(currentLang === 'ru' ? 'Пользователь не найден. Создать нового?' : 'User not found. Create new?')) {
+                socket.emit('register', { username: username, password: password });
+                socket.once('login_success', function(data2) {
+                    console.log('✅ Аккаунт создан!');
+                    currentUser = data2.name;
+                    currentToken = data2.token;
+                    currentAvatar = data2.avatar;
+                    currentUsername = data2.username || data2.name;
+                    currentBio = data2.bio || '';
+                    localStorage.setItem('directme_token', data2.token);
+                    localStorage.setItem('directme_user', data2.name);
+                    enterApp();
+                });
+            }
+        } else {
+            showToast(t('error') + ': ' + data.message);
         }
     });
+    
+    setTimeout(function() {
+        if (!answered) {
+            showToast('⏰ ' + (currentLang === 'ru' ? 'Сервер не отвечает. Попробуйте позже.' : 'Server not responding. Try later.'));
+        }
+    }, 3000);
 }
+
+// ===== ЗАГРУЗКА КНОПКИ =====
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('📄 Страница загружена!');
+    
+    // Загружаем язык
+    currentLang = localStorage.getItem('directme_lang') || 'ru';
+    updateLanguageUI();
+    loadTheme();
+    
+    var btn = document.getElementById('loginBtn');
+    if (btn) {
+        console.log('✅ Кнопка найдена!');
+        btn.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            doLogin();
+        });
+        console.log('✅ Кнопка привязана!');
+    } else {
+        console.log('❌ Кнопка НЕ найдена!');
+    }
+});
 
 function showToast(msg) {
     const el = document.createElement('div');
@@ -1194,7 +1418,9 @@ function showToast(msg) {
     setTimeout(() => el.remove(), 2500);
 }
 
+// ===== SOCKET EVENTS =====
 socket.on('login_success', function(data) {
+    console.log('✅ Вход выполнен (socket)!');
     currentUser = data.name;
     currentToken = data.token;
     currentAvatar = data.avatar;
@@ -1206,7 +1432,7 @@ socket.on('login_success', function(data) {
 });
 
 socket.on('error', function(data) {
-    showToast(data.message);
+    showToast(t('error') + ': ' + data.message);
 });
 
 socket.on('push_notification', (data) => {
@@ -1250,7 +1476,7 @@ socket.on('new_post', (data) => {
 
 socket.on('posts_list', (data) => {
     if (!data.posts || !data.posts.length) {
-        postsList.innerHTML = `<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg><h3>Нет постов</h3><p>Создайте первый пост!</p></div>`;
+        postsList.innerHTML = `<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg><h3>${t('noPosts')}</h3><p>${t('noPostsDesc')}</p></div>`;
         return;
     }
     postsList.innerHTML = data.posts.map(p => renderPost(p)).join('');
@@ -1280,8 +1506,8 @@ socket.on('message_edited', (data) => {
 
 socket.on('share_link', (data) => {
     const url = 'https://' + data.url;
-    if (navigator.clipboard) { navigator.clipboard.writeText(url).then(() => showToast('Ссылка скопирована!')); }
-    else { prompt('Ссылка:', url); }
+    if (navigator.clipboard) { navigator.clipboard.writeText(url).then(() => showToast(t('copyLink'))); }
+    else { prompt('Link:', url); }
 });
 
 socket.on('reaction_updated', (data) => {
@@ -1310,6 +1536,9 @@ socket.on('reaction_updated', (data) => {
     }
 });
 
+// ============================================================
+//  ВХОД В ПРИЛОЖЕНИЕ
+// ============================================================
 function enterApp() {
     $('loginScreen').classList.add('hidden');
     $('nav').style.display = 'flex';
@@ -1355,13 +1584,13 @@ function switchPage(page) {
 
 function renderChats() {
     if (!privateChats.length) {
-        chatList.innerHTML = `<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><h3>Нет чатов</h3><p>Найдите людей в разделе "Люди"</p></div>`;
+        chatList.innerHTML = `<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><h3>${t('noChats')}</h3><p>${t('noChatsDesc')}</p></div>`;
         return;
     }
     let html = '';
     privateChats.forEach(c => {
         const ur = unreadData[c.id] || 0;
-        const lastMsg = c.lastMsg || 'Напишите первым...';
+        const lastMsg = c.lastMsg || t('writeFirst');
         const username = users[c.name]?.username || c.name;
         html += `
             <div class="chat-item" onclick="openPrivateChat('${c.id}', '${c.name}')">
@@ -1385,7 +1614,7 @@ function renderUsers() { socket.emit('get_users', { name: currentUser }); }
 
 function renderUsersList(users) {
     if (!users || !users.length) {
-        usersList.innerHTML = `<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg><h3>Нет пользователей</h3></div>`;
+        usersList.innerHTML = `<div class="empty-state"><svg class="icon" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg><h3>${t('noUsers')}</h3></div>`;
         return;
     }
     usersList.innerHTML = users.map(u => `
@@ -1396,7 +1625,7 @@ function renderUsersList(users) {
             </div>
             <div class="chat-info">
                 <div class="chat-name">${u.name} <span class="chat-username">@${u.username}</span></div>
-                <div class="chat-last">${u.bio || 'Привет!'}</div>
+                <div class="chat-last">${u.bio || t('noDescription')}</div>
             </div>
             <button onclick="event.stopPropagation();startPrivateChat('${u.name}')" class="btn-icon" style="color:var(--primary)">
                 <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
@@ -1428,14 +1657,14 @@ function viewProfile(name) {
                 <div class="profile-avatar" style="cursor:default">${user.avatar ? `<img src="${user.avatar}">` : name[0]}</div>
                 <div class="profile-name">${name}</div>
                 <div class="profile-username">@${user.username || name}</div>
-                <div class="profile-bio">${user.bio || 'Нет описания'}</div>
-                <div class="profile-status">${user.status === 'online' ? '🟢 В сети' : '⚪ Не в сети'}</div>
-                <button class="form-btn" style="margin-top:12px;width:auto;padding:8px 24px;" onclick="startPrivateChat('${name}')">Написать</button>
-                <button class="form-link" onclick="closeProfile()">← Назад</button>
+                <div class="profile-bio">${user.bio || t('noDescription')}</div>
+                <div class="profile-status">${user.status === 'online' ? '🟢 ' + t('online') : '⚪ ' + t('offline')}</div>
+                <button class="form-btn" style="margin-top:12px;width:auto;padding:8px 24px;" onclick="startPrivateChat('${name}')">${t('message')}</button>
+                <button class="form-link" onclick="closeProfile()">← ${t('settings')}</button>
             </div>
             <div style="margin-top:8px;">
-                <h3 style="font-size:14px;margin-bottom:4px;">Посты (${userPosts.length})</h3>
-                ${userPosts.length ? userPosts.map(p => renderPost(p)).join('') : '<div style="color:var(--text-secondary);font-size:12px;">Нет постов</div>'}
+                <h3 style="font-size:14px;margin-bottom:4px;">📸 ${t('posts')} (${userPosts.length})</h3>
+                ${userPosts.length ? userPosts.map(p => renderPost(p)).join('') : '<div style="color:var(--text-secondary);font-size:12px;">' + t('noPosts') + '</div>'}
             </div>
         </div>
     `;
@@ -1493,7 +1722,7 @@ function closeChat() {
 }
 
 function deleteChat() {
-    if (!confirm('Удалить чат из списка?')) return;
+    if (!confirm(t('delete') + '?')) return;
     privateChats = privateChats.filter(c => c.id !== currentChat);
     localStorage.setItem('private_chats', JSON.stringify(privateChats));
     closeChat();
@@ -1576,12 +1805,12 @@ function renderMessage(msg) {
 }
 
 function deleteMessage(msgId) {
-    if (!confirm('Удалить сообщение?')) return;
+    if (!confirm(t('delete') + '?')) return;
     socket.emit('delete_message', { chat: currentChat, msg_id: msgId, name: currentUser });
 }
 
 function editMessage(msgId) {
-    const newText = prompt('Редактировать:');
+    const newText = prompt(t('edit') + ':');
     if (newText?.trim()) {
         socket.emit('edit_message', { chat: currentChat, msg_id: msgId, name: currentUser, content: newText.trim() });
     }
@@ -1592,14 +1821,14 @@ function pinMessage(msgId) {
 }
 
 function replyToMessage(msgId, name, content) {
-    const replyText = prompt('Ответ на сообщение от ' + name + ': ' + content);
+    const replyText = prompt(t('reply') + ' ' + name + ': ' + content);
     if (replyText?.trim()) {
         socket.emit('reply_message', { chat: currentChat, msg_id: msgId, name: currentUser, reply: replyText.trim() });
     }
 }
 
 function forwardMessage(msgId) {
-    const target = prompt('Введите имя пользователя для пересылки:');
+    const target = prompt(t('forward') + ':');
     if (target && target.trim() && target !== currentUser) {
         socket.emit('forward_message', { chat: currentChat, msg_id: msgId, from: currentUser, to: target.trim() });
     }
@@ -1628,7 +1857,7 @@ function toggleRecording() {
         $('recordBtn').classList.remove('recording');
         return;
     }
-    if (!currentChat) { showToast('Откройте чат'); return; }
+    if (!currentChat) { showToast(t('error')); return; }
     navigator.mediaDevices.getUserMedia({ audio: true })
         .then(stream => {
             mediaRecorder = new MediaRecorder(stream);
@@ -1647,7 +1876,7 @@ function toggleRecording() {
             mediaRecorder.start();
             isRecording = true;
             $('recordBtn').classList.add('recording');
-            showToast('⏺ Запись... 30 сек');
+            showToast('⏺ ' + t('recording') + ' 30 ' + (currentLang === 'ru' ? 'сек' : 'sec'));
             setTimeout(() => {
                 if (isRecording && mediaRecorder) {
                     mediaRecorder.stop();
@@ -1656,7 +1885,7 @@ function toggleRecording() {
                 }
             }, 30000);
         })
-        .catch(() => showToast('Нет доступа к микрофону'));
+        .catch(() => showToast(t('error')));
 }
 
 function handleFile(e) {
@@ -1680,7 +1909,7 @@ function createPost() { $('postInput').click(); }
 function handlePost(e) {
     const file = e.target.files[0];
     if (!file) return;
-    const caption = prompt('Описание:') || '';
+    const caption = prompt(t('caption')) || '';
     const reader = new FileReader();
     reader.onload = (ev) => {
         socket.emit('create_post', {
@@ -1689,7 +1918,7 @@ function handlePost(e) {
             media_type: file.type.startsWith('video') ? 'video' : 'image',
             caption: caption
         });
-        showToast('Пост опубликован!');
+        showToast(t('postPublished'));
     };
     reader.readAsDataURL(file);
     e.target.value = '';
@@ -1745,7 +1974,7 @@ function renderPost(p) {
                 </div>
             </div>
             <div class="comment-input">
-                <input id="comment-${p.id}" placeholder="Написать комментарий..." onkeypress="if(event.key==='Enter')sendComment('${p.id}')">
+                <input id="comment-${p.id}" placeholder="${t('comment')}" onkeypress="if(event.key==='Enter')sendComment('${p.id}')">
                 <button onclick="sendComment('${p.id}')">→</button>
             </div>
         </div>
@@ -1770,7 +1999,7 @@ function sendComment(postId) {
 }
 
 function deletePost(postId) {
-    if (!confirm('Удалить пост?')) return;
+    if (!confirm(t('delete') + '?')) return;
     fetch('/delete_post', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pid: postId, n: currentUser }) });
     setTimeout(() => socket.emit('get_posts'), 500);
 }
@@ -1782,7 +2011,7 @@ function searchHashtag(tag) {
         if (data.posts && data.posts.length) {
             postsList.innerHTML = data.posts.map(p => renderPost(p)).join('');
         } else {
-            postsList.innerHTML = `<div class="empty-state"><h3>Нет постов с #${tag}</h3></div>`;
+            postsList.innerHTML = `<div class="empty-state"><h3>#${tag}</h3><p>${t('noPosts')}</p></div>`;
         }
     });
 }
@@ -1794,30 +2023,38 @@ function renderSettings() {
             <div class="profile-avatar" onclick="$('avatarInput').click()">${avatar}</div>
             <div class="profile-name">${currentUser || 'Гость'}</div>
             <div class="profile-username">@${currentUsername || currentUser}</div>
-            <div class="profile-bio">${currentBio || 'Нажмите чтобы добавить описание'}</div>
-            <div class="profile-status">🟢 В сети</div>
+            <div class="profile-bio">${currentBio || t('noDescription')}</div>
+            <div class="profile-status">🟢 ${t('online')}</div>
         </div>
         <div class="settings-group">
-            <div class="setting-item" onclick="toggleTheme()"><span class="setting-label">🌓 Тема: <span id="themeLabel">Темная</span></span></div>
-            <div class="setting-item" onclick="editBio()"><span class="setting-label">✏️ Редактировать описание</span></div>
-            <div class="setting-item" onclick="editProfile()"><span class="setting-label">✏️ Редактировать профиль</span></div>
-            <div class="setting-item" onclick="shareApp()"><span class="setting-label">🔗 Поделиться</span></div>
-            <div class="setting-item" onclick="logout()" style="border-left:3px solid #ff3b30"><span class="setting-label" style="color:#ff3b30">🚪 Выйти</span></div>
+            <div class="setting-item" onclick="toggleTheme()"><span class="setting-label">🌓 ${t('theme')}: <span id="themeLabel">${document.body.classList.contains('light') ? t('light') : t('dark')}</span></span></div>
+            <div class="setting-item" onclick="toggleLanguage()"><span class="setting-label">🌐 ${t('language')}: <span id="langLabel">${currentLang === 'ru' ? 'Русский' : 'English'}</span></span></div>
+            <div class="setting-item" onclick="editBio()"><span class="setting-label">✏️ ${t('editBio')}</span></div>
+            <div class="setting-item" onclick="editProfile()"><span class="setting-label">✏️ ${t('editProfile')}</span></div>
+            <div class="setting-item" onclick="shareApp()"><span class="setting-label">🔗 ${t('share')}</span></div>
+            <div class="setting-item" onclick="logout()" style="border-left:3px solid #ff3b30"><span class="setting-label" style="color:#ff3b30">🚪 ${t('logout')}</span></div>
         </div>
     `;
 }
 
+function toggleLanguage() {
+    const newLang = currentLang === 'ru' ? 'en' : 'ru';
+    setLanguage(newLang);
+    document.getElementById('langLabel').textContent = newLang === 'ru' ? 'Русский' : 'English';
+    renderSettings();
+}
+
 function editBio() {
-    const bio = prompt('Введите описание:', currentBio || '');
+    const bio = prompt(t('editBio') + ':', currentBio || '');
     if (bio !== null) { currentBio = bio; socket.emit('update_bio', { name: currentUser, bio }); renderSettings(); }
 }
 
 function editProfile() {
-    const newName = prompt('Новое имя (2-20 символов):', currentUser);
+    const newName = prompt(t('editProfile') + ' (' + t('username') + '):', currentUser);
     if (newName && newName.trim() && newName !== currentUser) {
         socket.emit('update_profile', { name: currentUser, new_name: newName.trim() });
     }
-    const newUsername = prompt('Новый юзернейм (3-20 символов, латиница):', currentUsername);
+    const newUsername = prompt(t('editProfile') + ' (@' + t('username') + '):', currentUsername);
     if (newUsername && newUsername.trim() && newUsername !== currentUsername) {
         socket.emit('update_profile', { name: currentUser, new_username: newUsername.trim().toLowerCase() });
     }
@@ -1831,14 +2068,14 @@ function handleAvatar(e) {
         currentAvatar = ev.target.result;
         socket.emit('update_avatar', { name: currentUser, avatar: ev.target.result });
         renderSettings();
-        showToast('Аватар обновлен!');
+        showToast(t('success'));
     };
     reader.readAsDataURL(file);
     e.target.value = '';
 }
 
 function logout() {
-    if (!confirm('Выйти?')) return;
+    if (!confirm(t('logout') + '?')) return;
     socket.emit('logout', { token: currentToken });
     localStorage.removeItem('directme_token');
     localStorage.removeItem('directme_user');
