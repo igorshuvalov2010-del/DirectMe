@@ -3,9 +3,10 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 from datetime import datetime
 import random, time, os, hashlib, json, re
 from functools import wraps
+from cryptography.fernet import Fernet
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'shugramm-secret-key')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'directme-secret-key')
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=100*1024*1024)
 
 # ========== ДАННЫЕ ==========
@@ -36,13 +37,13 @@ def save_data():
         'private_chats': private_chats,
         'unread': unread
     }
-    with open('shugramm_data.json', 'w') as f:
+    with open('directme_data.json', 'w') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def load_data():
     global users, posts, groups, private_chats, unread
     try:
-        with open('shugramm_data.json', 'r') as f:
+        with open('directme_data.json', 'r') as f:
             data = json.load(f)
             users = data.get('users', {})
             posts = data.get('posts', [])
@@ -260,7 +261,6 @@ def send_message(data):
     save_data()
     emit('new_message', {'chat': chat, 'message': msg}, room=chat)
     
-    # Уведомления о непрочитанных
     if chat in private_chats:
         for member in private_chats[chat]['users']:
             if member != name:
@@ -474,14 +474,13 @@ def edit_message(data):
 def share_link():
     emit('share_link', {'url': request.host})
 
-# ========== HTML ==========
-HTML = '''
-<!DOCTYPE html>
+# ========== HTML (ВЕСЬ HTML КОД В ОДНОЙ СТРОКЕ) ==========
+HTML = '''<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<title>Shugramm</title>
+<title>DirectMe - Мессенджер</title>
 <style>
 * {
     margin: 0;
@@ -516,7 +515,6 @@ body {
     align-items: center;
 }
 
-/* ===== SCROLLBAR ===== */
 ::-webkit-scrollbar {
     width: 4px;
 }
@@ -531,7 +529,6 @@ body {
     background: var(--gold-dark);
 }
 
-/* ===== APP ===== */
 #app {
     width: 100%;
     max-width: 480px;
@@ -544,7 +541,6 @@ body {
     overflow: hidden;
 }
 
-/* ===== HEADER ===== */
 .header {
     background: var(--bg2);
     padding: 10px 16px;
@@ -609,7 +605,6 @@ body {
     background: rgba(255, 215, 0, 0.1);
 }
 
-/* ===== NAV ===== */
 .nav {
     background: var(--bg2);
     display: flex;
@@ -662,7 +657,6 @@ body {
     padding: 0 4px;
 }
 
-/* ===== PAGES ===== */
 .page {
     flex: 1;
     overflow-y: auto;
@@ -675,7 +669,6 @@ body {
     display: block;
 }
 
-/* ===== CHAT LIST ===== */
 .chat-item {
     display: flex;
     align-items: center;
@@ -760,7 +753,6 @@ body {
     margin-left: auto;
 }
 
-/* ===== MESSAGES ===== */
 #chatWindow {
     display: none;
     flex: 1;
@@ -877,7 +869,6 @@ body {
     to { opacity: 1; transform: translateY(0); }
 }
 
-/* ===== TYPING ===== */
 .typing-indicator {
     font-size: 12px;
     color: var(--text-secondary);
@@ -891,7 +882,6 @@ body {
     opacity: 1;
 }
 
-/* ===== INPUT BAR ===== */
 .input-bar {
     display: flex;
     padding: 6px 10px;
@@ -943,7 +933,6 @@ body {
     opacity: 0.5;
 }
 
-/* ===== POSTS ===== */
 .post-card {
     background: var(--bg2);
     margin: 8px 12px;
@@ -1089,7 +1078,6 @@ body {
     font-size: 12px;
 }
 
-/* ===== PROFILE ===== */
 .profile-section {
     text-align: center;
     padding: 24px;
@@ -1162,7 +1150,6 @@ body {
     font-size: 13px;
 }
 
-/* ===== LOGIN ===== */
 #loginScreen {
     position: fixed;
     top: 0;
@@ -1252,7 +1239,6 @@ body {
     display: none !important;
 }
 
-/* ===== MEDIA VIEWER ===== */
 .media-viewer {
     position: fixed;
     top: 0;
@@ -1292,7 +1278,6 @@ body {
     cursor: pointer;
 }
 
-/* ===== NOTIFICATION ===== */
 .notification {
     position: fixed;
     top: 0;
@@ -1320,7 +1305,6 @@ body {
     to { transform: translateX(-50%) translateY(0); }
 }
 
-/* ===== FAB ===== */
 .fab {
     position: fixed;
     bottom: 80px;
@@ -1347,7 +1331,6 @@ body {
     transform: scale(0.9);
 }
 
-/* ===== EMPTY STATE ===== */
 .empty-state {
     text-align: center;
     padding: 40px 20px;
@@ -1365,7 +1348,6 @@ body {
     font-size: 13px;
 }
 
-/* ===== TOAST ===== */
 .toast {
     position: fixed;
     bottom: 80px;
@@ -1382,7 +1364,6 @@ body {
     max-width: 90%;
 }
 
-/* ===== RESPONSIVE ===== */
 @media (max-width: 480px) {
     .msg { max-width: 90%; }
     .msg-bubble img, .msg-bubble video { max-width: 160px; }
@@ -1391,24 +1372,20 @@ body {
 </head>
 <body>
 
-<!-- NOTIFICATION -->
 <div class="notification" id="notification"></div>
 
-<!-- APP -->
 <div id="app">
 
-    <!-- HEADER -->
     <div class="header">
         <div class="header-left">
-            <span class="logo-icon">⚡</span>
-            <span class="logo" id="headerTitle">Shugramm</span>
+            <span class="logo-icon">🎯</span>
+            <span class="logo" id="headerTitle">DirectMe</span>
         </div>
         <div class="header-right">
             <button class="btn" onclick="shareApp()">📤</button>
         </div>
     </div>
 
-    <!-- PAGES -->
     <div class="page active" id="pageChats">
         <div id="chatList"></div>
     </div>
@@ -1428,7 +1405,6 @@ body {
         <div id="settingsContent"></div>
     </div>
 
-    <!-- CHAT WINDOW -->
     <div id="chatWindow">
         <div class="header" style="border-bottom:1px solid var(--border);flex-shrink:0">
             <button class="btn" onclick="closeChat()">←</button>
@@ -1444,7 +1420,6 @@ body {
         </div>
     </div>
 
-    <!-- NAV -->
     <div class="nav" id="nav" style="display:none">
         <div class="nav-item active" onclick="switchPage('chats')">
             <span class="icon">💬</span>
@@ -1465,34 +1440,30 @@ body {
         </div>
     </div>
 
-    <!-- FAB -->
     <button class="fab" id="fab" onclick="createPost()">+</button>
 </div>
 
-<!-- MEDIA VIEWER -->
 <div class="media-viewer" id="mediaViewer">
     <button class="media-close" onclick="closeMedia()">✕</button>
     <img id="mediaImg" style="display:none">
     <video id="mediaVideo" controls style="display:none"></video>
 </div>
 
-<!-- HIDDEN INPUTS -->
 <input type="file" id="fileInput" accept="image/*,video/*" style="display:none" onchange="handleFile(event)">
 <input type="file" id="avatarInput" accept="image/*" style="display:none" onchange="handleAvatar(event)">
 <input type="file" id="postInput" accept="image/*,video/*" style="display:none" onchange="handlePost(event)">
 
-<!-- LOGIN SCREEN -->
 <div id="loginScreen">
     <div class="login-card">
         <div id="loginStep1">
-            <div class="login-logo">⚡</div>
-            <h1>Shugramm</h1>
+            <div class="login-logo">🎯</div>
+            <h1>DirectMe</h1>
             <p>Введите номер телефона для входа</p>
             <input class="form-input" id="phoneInput" placeholder="+7 999 123-45-67" type="tel">
             <button class="form-btn" onclick="requestCode()">Получить код</button>
         </div>
         <div id="loginStep2" class="hidden">
-            <div class="login-logo">⚡</div>
+            <div class="login-logo">🎯</div>
             <h1>Код</h1>
             <p>Отправлен на <span id="phoneDisplay" style="color:var(--gold)"></span></p>
             <div class="code-box" id="codeDisplay">000000</div>
@@ -1501,14 +1472,14 @@ body {
             <button class="form-link" onclick="backToPhone()">Изменить номер</button>
         </div>
         <div id="loginStep3" class="hidden">
-            <div class="login-logo">⚡</div>
+            <div class="login-logo">🎯</div>
             <h1>Регистрация</h1>
             <input class="form-input" id="regPassword" placeholder="Пароль (мин. 4 символа)" type="password">
             <input class="form-input" id="regName" placeholder="Имя пользователя (2-20 символов)">
             <button class="form-btn" onclick="registerUser()">Зарегистрироваться</button>
         </div>
         <div id="loginStep4" class="hidden">
-            <div class="login-logo">⚡</div>
+            <div class="login-logo">🎯</div>
             <h1>Вход</h1>
             <p id="loginName" style="color:var(--gold);font-weight:600"></p>
             <input class="form-input" id="loginPassword" placeholder="Пароль" type="password">
@@ -1520,7 +1491,6 @@ body {
 
 <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
 <script>
-// ========== CONFIG ==========
 const socket = io();
 let currentUser = null;
 let currentToken = null;
@@ -1533,7 +1503,6 @@ let unreadData = {};
 let privateChats = JSON.parse(localStorage.getItem('private_chats') || '[]');
 let isChatOpen = false;
 
-// ========== DOM REFS ==========
 const $ = id => document.getElementById(id);
 const notification = $('notification');
 const loginScreen = $('loginScreen');
@@ -1554,7 +1523,6 @@ const settingsContent = $('settingsContent');
 const fab = $('fab');
 const totalBadge = $('totalBadge');
 
-// ========== NOTIFICATIONS ==========
 function showNotification(msg) {
     notification.textContent = msg;
     notification.classList.add('show');
@@ -1570,7 +1538,6 @@ function showToast(msg) {
     setTimeout(() => el.remove(), 2500);
 }
 
-// ========== LOGIN ==========
 function requestCode() {
     const phone = $('phoneInput').value.trim();
     if (phone.length < 10) {
@@ -1630,7 +1597,6 @@ function backToStart() {
     $('loginStep1').classList.remove('hidden');
 }
 
-// ========== SOCKET EVENTS ==========
 socket.on('code_sent', (data) => {
     currentPhone = data.phone;
     $('loginStep1').classList.add('hidden');
@@ -1773,29 +1739,21 @@ socket.on('share_link', (data) => {
     }
 });
 
-// ========== AUTO LOGIN ==========
 const savedToken = localStorage.getItem('shugramm_token');
 const savedUser = localStorage.getItem('shugramm_user');
 if (savedToken && savedUser) {
     socket.emit('auto_login', { token: savedToken });
 }
 
-// ========== APP ==========
 function enterApp() {
     loginScreen.classList.add('hidden');
     nav.style.display = 'flex';
     fab.classList.add('show');
-    loadData();
     renderChats();
     renderUsers();
     renderSettings();
     socket.emit('get_posts');
     setInterval(() => socket.emit('get_users', { name: currentUser }), 30000);
-}
-
-function loadData() {
-    // Load private chats from localStorage
-    privateChats = JSON.parse(localStorage.getItem('private_chats') || '[]');
 }
 
 function switchPage(page) {
@@ -1893,7 +1851,6 @@ function searchUsers() {
     });
 }
 
-// ========== CHAT ==========
 function openChat(chat, name) {
     currentChat = chat;
     currentChatName = name;
@@ -1955,7 +1912,6 @@ function openPrivateChatData(chatId, user, avatar, messages) {
         scrollToBottom();
     }
     
-    // Save to private chats
     const exists = privateChats.some(c => c.id === chatId);
     if (!exists) {
         privateChats.push({ id: chatId, name: user, avatar: avatar || user[0], lastMsg: '' });
@@ -2080,7 +2036,6 @@ function scrollToBottom() {
     }, 50);
 }
 
-// ========== POSTS ==========
 function createPost() {
     document.getElementById('postInput').click();
 }
@@ -2173,7 +2128,6 @@ function deletePost(postId) {
     setTimeout(() => socket.emit('get_posts'), 500);
 }
 
-// ========== SETTINGS ==========
 function renderSettings() {
     const avatar = currentAvatar ? `<img src="${currentAvatar}">` : (currentUser ? currentUser[0] : '?');
     settingsContent.innerHTML = `
@@ -2236,7 +2190,6 @@ function shareApp() {
     socket.emit('share_link');
 }
 
-// ========== MEDIA ==========
 function openMedia(src, type) {
     const viewer = document.getElementById('mediaViewer');
     viewer.classList.add('open');
@@ -2257,7 +2210,6 @@ function closeMedia() {
     document.getElementById('mediaVideo').pause();
 }
 
-// ========== BADGE ==========
 function updateBadge() {
     let total = 0;
     for (const key in unreadData) {
@@ -2271,7 +2223,6 @@ function updateBadge() {
     }
 }
 
-// ========== KEYBOARD SHORTCUTS ==========
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
         if (document.getElementById('mediaViewer').classList.contains('open')) {
@@ -2282,12 +2233,10 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
-// ========== INIT ==========
-console.log('⚡ Shugramm загружен!');
+console.log('🎯 DirectMe загружен!');
 </script>
 </body>
-</html>
-'''
+</html>'''
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
