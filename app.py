@@ -4,77 +4,27 @@ from datetime import datetime, timedelta
 import random, time, os, hashlib, json, re, base64, io
 from functools import wraps
 import threading
-import secrets
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'directme-secret-key')
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=500*1024*1024)
 
 # ============================================================
-#  БАЗА ДАННЫХ (ВСЁ В ПАМЯТИ + JSON)
+#  БАЗА ДАННЫХ
 # ============================================================
-users = {}                # name -> {sid, phone, username, password, avatar, status, bio, token, last_seen, created_at, is_verified, is_banned}
-posts = {}                # post_id -> {id, author, avatar, content, media_type, caption, hashtags, likes, comments, saved_by, reposts, time, timestamp}
-stories = {}              # name -> [{id, content, type, timestamp, views}]
-private_chats = {}        # chat_id -> {users: [u1,u2], messages: [...]}
-group_chats = {}          # chat_id -> {name, admin, members: [...], messages: [...], avatar, created_at}
-pending = {}              # phone -> {code, time}
-unread = {}               # user -> {chat_id: count}
-typing_users = {}         # chat_id -> {name: timestamp}
-message_reactions = {}    # msg_id -> {user: emoji}
-message_replies = {}      # msg_id -> [reply_msg_id]
-pinned_messages = {}      # chat_id -> [msg_id]
-blocked_users = {}        # user -> [blocked_user]
-saved_posts = {}          # user -> [post_id]
-reposts = {}              # post_id -> [user]
-user_status_history = {}  # user -> {status, time}
-user_typing = {}          # chat_id -> {user: timestamp}
-voice_messages = {}       # msg_id -> audio_data
-forwarded_messages = {}   # msg_id -> original_msg_id
-user_last_seen = {}       # user -> timestamp
-user_online_status = {}   # user -> bool
-chat_participants = {}    # chat_id -> [users]
-message_views = {}        # msg_id -> [user]
-user_contacts = {}        # user -> [contact_name]
-user_favorites = {}       # user -> [post_id]
-user_blocked = {}         # user -> [blocked_user]
-user_reports = {}         # user -> [reported_user]
-user_notifications = {}   # user -> [{type, from, content, time, read}]
-user_settings = {}        # user -> {theme, notifications, privacy}
-user_activity = {}        # user -> {last_active, online}
-user_devices = {}         # user -> [device_id]
-user_sessions = {}        # user -> [token]
-user_emails = {}          # user -> email
-user_phones = {}          # user -> phone
-user_two_factor = {}      # user -> {enabled, secret}
-user_api_keys = {}        # user -> [api_key]
-user_webhooks = {}        # user -> [webhook_url]
-user_bots = {}            # user -> [bot_id]
-user_channels = {}        # user -> [channel_id]
-user_polls = {}           # poll_id -> {question, options, votes, created_by, created_at}
-user_quizzes = {}         # quiz_id -> {question, options, correct_answer, created_by, created_at}
-user_events = {}          # event_id -> {title, description, date, location, created_by, attendees}
-user_tasks = {}           # task_id -> {title, description, due_date, assigned_to, created_by, status}
-user_notes = {}           # note_id -> {title, content, created_by, created_at}
-user_files = {}           # file_id -> {name, size, type, content, created_by, created_at}
-user_links = {}           # link_id -> {url, title, description, created_by, created_at}
-user_locations = {}       # location_id -> {name, latitude, longitude, created_by}
-user_contacts_list = {}   # user -> [contact]
-user_groups = {}          # user -> [group_id]
-user_channels_list = {}   # user -> [channel_id]
-user_bots_list = {}       # user -> [bot_id]
-user_polls_list = {}      # user -> [poll_id]
-user_quizzes_list = {}    # user -> [quiz_id]
-user_events_list = {}     # user -> [event_id]
-user_tasks_list = {}      # user -> [task_id]
-user_notes_list = {}      # user -> [note_id]
-user_files_list = {}      # user -> [file_id]
-user_links_list = {}      # user -> [link_id]
-user_locations_list = {}  # user -> [location_id]
+users = {}
+posts = {}
+stories = {}
+private_chats = {}
+group_chats = {}
+unread = {}
+typing_users = {}
+pinned_messages = {}
+blocked_users = {}
+saved_posts = {}
+reposts = {}
+user_status_history = {}
 
-# ============================================================
-#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ============================================================
 def hash_pass(password):
     salt = os.urandom(32).hex()
     return salt + ':' + hashlib.sha256((salt + password).encode()).hexdigest()
@@ -85,9 +35,6 @@ def verify_pass(password, hashed):
 
 def generate_token():
     return hashlib.sha256(str(random.random()).encode()).hexdigest()[:32]
-
-def get_user_by_name(name):
-    return users.get(name)
 
 def get_user_by_username(username):
     for name, user in users.items():
@@ -100,25 +47,17 @@ def is_blocked(user1, user2):
 
 def save_data():
     data = {
-        'users': users,
-        'posts': posts,
-        'stories': stories,
-        'private_chats': private_chats,
-        'group_chats': group_chats,
-        'unread': unread,
-        'blocked_users': blocked_users,
-        'saved_posts': saved_posts,
-        'reposts': reposts,
-        'pinned_messages': pinned_messages,
-        'user_settings': user_settings,
-        'user_contacts': user_contacts,
-        'user_favorites': user_favorites
+        'users': users, 'posts': posts, 'stories': stories,
+        'private_chats': private_chats, 'group_chats': group_chats,
+        'unread': unread, 'blocked_users': blocked_users,
+        'saved_posts': saved_posts, 'reposts': reposts,
+        'pinned_messages': pinned_messages
     }
     with open('directme_data.json', 'w') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def load_data():
-    global users, posts, stories, private_chats, group_chats, unread, blocked_users, saved_posts, reposts, pinned_messages, user_settings, user_contacts, user_favorites
+    global users, posts, stories, private_chats, group_chats, unread, blocked_users, saved_posts, reposts, pinned_messages
     try:
         with open('directme_data.json', 'r') as f:
             data = json.load(f)
@@ -132,17 +71,11 @@ def load_data():
             saved_posts = data.get('saved_posts', {})
             reposts = data.get('reposts', {})
             pinned_messages = data.get('pinned_messages', {})
-            user_settings = data.get('user_settings', {})
-            user_contacts = data.get('user_contacts', {})
-            user_favorites = data.get('user_favorites', {})
     except:
         pass
 
 load_data()
 
-# ============================================================
-#  ДЕКОРАТОРЫ
-# ============================================================
 def auth_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -155,9 +88,6 @@ def auth_required(f):
         return jsonify({'error': 'Недействительный токен'}), 401
     return decorated
 
-# ============================================================
-#  HTTP РОУТЫ
-# ============================================================
 @app.route('/')
 def index():
     return render_template_string(HTML)
@@ -187,63 +117,8 @@ def delete_post():
         return {'ok': True}
     return {'ok': False}, 403
 
-@app.route('/api/stories')
-@auth_required
-def get_stories(user, name):
-    active_stories = {}
-    for n, story_list in stories.items():
-        if n != name and n not in blocked_users.get(name, []):
-            for story in story_list:
-                if time.time() - story['timestamp'] < 86400:
-                    active_stories[n] = story
-                    break
-    return jsonify({'stories': active_stories})
-
-@app.route('/api/chats')
-@auth_required
-def get_chats(user, name):
-    chats = []
-    for chat_id, chat in private_chats.items():
-        if name in chat['users']:
-            other = [u for u in chat['users'] if u != name][0]
-            chats.append({'id': chat_id, 'name': other, 'avatar': users.get(other, {}).get('avatar'), 'last_msg': chat['messages'][-1]['content'] if chat['messages'] else '', 'unread': unread.get(name, {}).get(chat_id, 0)})
-    for chat_id, chat in group_chats.items():
-        if name in chat['members']:
-            chats.append({'id': chat_id, 'name': chat['name'], 'avatar': chat.get('avatar'), 'last_msg': chat['messages'][-1]['content'] if chat['messages'] else '', 'unread': unread.get(name, {}).get(chat_id, 0), 'is_group': True})
-    return jsonify({'chats': chats})
-
-@app.route('/api/messages/<chat_id>')
-@auth_required
-def get_messages(user, name, chat_id):
-    if chat_id in private_chats:
-        if name not in private_chats[chat_id]['users']:
-            return jsonify({'error': 'Нет доступа'}), 403
-        return jsonify({'messages': private_chats[chat_id]['messages'][-200:]})
-    elif chat_id in group_chats:
-        if name not in group_chats[chat_id]['members']:
-            return jsonify({'error': 'Нет доступа'}), 403
-        return jsonify({'messages': group_chats[chat_id]['messages'][-200:]})
-    return jsonify({'error': 'Чат не найден'}), 404
-
-@app.route('/api/user/<name>')
-@auth_required
-def get_user_profile(user, name, target_name):
-    if target_name not in users:
-        return jsonify({'error': 'Пользователь не найден'}), 404
-    target = users[target_name]
-    return jsonify({
-        'name': target_name,
-        'username': target.get('username', target_name),
-        'avatar': target.get('avatar'),
-        'bio': target.get('bio', ''),
-        'status': target.get('status', 'offline'),
-        'last_seen': target.get('last_seen', 0),
-        'created_at': target.get('created_at', 0),
-        'posts_count': len([p for p in posts.values() if p['author'] == target_name]),
-        'followers': len([u for u in users.values() if target_name in u.get('contacts', [])])
-    })
 # ============================================================
-#  WEBSOCKET: АУТЕНТИФИКАЦИЯ И РЕГИСТРАЦИЯ
+#  WEBSOCKET: АУТЕНТИФИКАЦИЯ (ТОЛЬКО ЮЗЕРНЕЙМ + ПАРОЛЬ)
 # ============================================================
 @socketio.on('connect')
 def handle_connect():
@@ -262,70 +137,25 @@ def handle_disconnect():
 
 @socketio.on('register')
 def register(data):
-    phone = ''.join(filter(str.isdigit, data.get('phone', '')))
-    if len(phone) < 10:
-        emit('error', {'message': 'Введите корректный номер телефона'})
-        return
-    code = str(random.randint(100000, 999999))
-    pending[phone] = {'code': code, 'time': time.time()}
-    print(f"📱 Код для {phone}: {code}")
-    emit('code_sent', {'phone': phone, 'code': code})
-
-@socketio.on('verify_code')
-def verify_code(data):
-    phone = data.get('phone', '')
-    code = data.get('code', '')
-    if phone not in pending:
-        emit('error', {'message': 'Сессия истекла'})
-        return
-    if time.time() - pending[phone]['time'] > 300:
-        del pending[phone]
-        emit('error', {'message': 'Код истек'})
-        return
-    if code != pending[phone]['code']:
-        emit('error', {'message': 'Неверный код'})
-        return
-    del pending[phone]
-    for name, user in users.items():
-        if user.get('phone') == phone:
-            emit('user_exists', {'name': name})
-            return
-    emit('new_user', {'phone': phone})
-
-@socketio.on('create_user')
-def create_user(data):
-    phone = data.get('phone', '')
-    name = data.get('name', '').strip()
     username = data.get('username', '').strip().lower()
     password = data.get('password', '')
     
-    if not name or len(name) < 2 or len(name) > 20:
-        emit('error', {'message': 'Имя 2-20 символов'})
-        return
-    if not re.match(r'^[a-zA-Zа-яА-Я0-9_]+$', name):
-        emit('error', {'message': 'Недопустимые символы'})
-        return
     if not username or len(username) < 3 or len(username) > 20:
         emit('error', {'message': 'Юзернейм 3-20 символов'})
         return
     if not re.match(r'^[a-zA-Z0-9_]+$', username):
         emit('error', {'message': 'Юзернейм: латиница, цифры, _'})
         return
-    if name in users:
+    if username in users:
         emit('error', {'message': 'Пользователь уже существует'})
         return
-    for u in users.values():
-        if u.get('username') == username:
-            emit('error', {'message': 'Юзернейм занят'})
-            return
     if len(password) < 4:
         emit('error', {'message': 'Пароль минимум 4 символа'})
         return
     
     token = generate_token()
-    users[name] = {
+    users[username] = {
         'sid': request.sid,
-        'phone': phone,
         'username': username,
         'password': hash_pass(password),
         'avatar': None,
@@ -334,55 +164,54 @@ def create_user(data):
         'token': token,
         'last_seen': time.time(),
         'created_at': time.time(),
-        'is_verified': False,
-        'is_banned': False,
-        'contacts': [],
-        'favorites': []
+        'is_banned': False
     }
-    unread[name] = {}
-    user_status_history[name] = {'status': 'online', 'time': time.time()}
+    unread[username] = {}
+    user_status_history[username] = {'status': 'online', 'time': time.time()}
     save_data()
-    emit('login_success', {'name': name, 'username': username, 'token': token, 'avatar': None, 'bio': ''})
-    emit('user_joined', {'name': name, 'username': username, 'avatar': None, 'status': 'online'}, broadcast=True)
+    emit('login_success', {'name': username, 'username': username, 'token': token, 'avatar': None, 'bio': ''})
+    emit('user_joined', {'name': username, 'username': username, 'avatar': None, 'status': 'online'}, broadcast=True)
 
 @socketio.on('login')
 def login(data):
-    name = data.get('name', '').strip()
+    username = data.get('username', '').strip().lower()
     password = data.get('password', '')
-    if name not in users:
+    
+    if username not in users:
         emit('error', {'message': 'Пользователь не найден'})
         return
-    if users[name].get('is_banned', False):
+    if users[username].get('is_banned', False):
         emit('error', {'message': 'Аккаунт заблокирован'})
         return
-    if not verify_pass(password, users[name]['password']):
+    if not verify_pass(password, users[username]['password']):
         emit('error', {'message': 'Неверный пароль'})
         return
+    
     token = generate_token()
-    users[name]['sid'] = request.sid
-    users[name]['status'] = 'online'
-    users[name]['token'] = token
-    users[name]['last_seen'] = time.time()
-    user_status_history[name] = {'status': 'online', 'time': time.time()}
+    users[username]['sid'] = request.sid
+    users[username]['status'] = 'online'
+    users[username]['token'] = token
+    users[username]['last_seen'] = time.time()
+    user_status_history[username] = {'status': 'online', 'time': time.time()}
     save_data()
     emit('login_success', {
-        'name': name,
-        'username': users[name].get('username', name),
+        'name': username,
+        'username': username,
         'token': token,
-        'avatar': users[name].get('avatar'),
-        'bio': users[name].get('bio', '')
+        'avatar': users[username].get('avatar'),
+        'bio': users[username].get('bio', '')
     })
     emit('user_joined', {
-        'name': name,
-        'username': users[name].get('username', name),
-        'avatar': users[name].get('avatar'),
+        'name': username,
+        'username': username,
+        'avatar': users[username].get('avatar'),
         'status': 'online'
     }, broadcast=True)
 
 @socketio.on('auto_login')
 def auto_login(data):
     token = data.get('token', '')
-    for name, user in users.items():
+    for username, user in users.items():
         if user.get('token') == token:
             if user.get('is_banned', False):
                 emit('error', {'message': 'Аккаунт заблокирован'})
@@ -390,25 +219,25 @@ def auto_login(data):
             user['sid'] = request.sid
             user['status'] = 'online'
             user['last_seen'] = time.time()
-            user_status_history[name] = {'status': 'online', 'time': time.time()}
+            user_status_history[username] = {'status': 'online', 'time': time.time()}
             save_data()
             emit('login_success', {
-                'name': name,
-                'username': user.get('username', name),
+                'name': username,
+                'username': username,
                 'token': token,
                 'avatar': user.get('avatar'),
                 'bio': user.get('bio', '')
             })
             emit('user_joined', {
-                'name': name,
-                'username': user.get('username', name),
+                'name': username,
+                'username': username,
                 'avatar': user.get('avatar'),
                 'status': 'online'
             }, broadcast=True)
             return
 
 # ============================================================
-#  WEBSOCKET: СООБЩЕНИЯ (ТЕКСТ, ФОТО, ВИДЕО, ГОЛОС)
+#  WEBSOCKET: СООБЩЕНИЯ, РЕАКЦИИ, РЕПЛАИ, ПЕРЕСЫЛКА
 # ============================================================
 @socketio.on('send_message')
 def send_message(data):
@@ -421,7 +250,6 @@ def send_message(data):
     
     if name not in users:
         return
-    
     if chat in private_chats:
         for member in private_chats[chat]['users']:
             if member != name and is_blocked(name, member):
@@ -445,11 +273,9 @@ def send_message(data):
         'avatar': users[name].get('avatar'),
         'edited': False,
         'reactions': {},
-        'replies': [],
         'reply_to': reply_to,
         'forwarded_from': forwarded_from,
         'read_by': [name],
-        'views': [name],
         'is_pinned': False
     }
     
@@ -464,12 +290,7 @@ def send_message(data):
                 unread.setdefault(member, {})
                 unread[member][chat] = unread[member].get(chat, 0) + 1
                 if users.get(member, {}).get('sid'):
-                    emit('push_notification', {
-                        'from': name,
-                        'content': content[:100] + ('...' if len(content) > 100 else ''),
-                        'chat_id': chat,
-                        'msg_id': msg['id']
-                    }, room=users[member]['sid'])
+                    emit('push_notification', {'from': name, 'content': content[:100] + ('...' if len(content) > 100 else ''), 'chat_id': chat, 'msg_id': msg['id']}, room=users[member]['sid'])
     
     elif chat in group_chats:
         if name not in group_chats[chat]['members']:
@@ -484,12 +305,7 @@ def send_message(data):
                 unread.setdefault(member, {})
                 unread[member][chat] = unread[member].get(chat, 0) + 1
                 if users.get(member, {}).get('sid'):
-                    emit('push_notification', {
-                        'from': name,
-                        'content': content[:100] + ('...' if len(content) > 100 else ''),
-                        'chat_id': chat,
-                        'msg_id': msg['id']
-                    }, room=users[member]['sid'])
+                    emit('push_notification', {'from': name, 'content': content[:100] + ('...' if len(content) > 100 else ''), 'chat_id': chat, 'msg_id': msg['id']}, room=users[member]['sid'])
 
 @socketio.on('join_chat')
 def join_chat(data):
@@ -533,23 +349,6 @@ def typing(data):
         typing_users[chat].pop(name, None)
     emit('typing_status', {'name': name, 'typing': is_typing}, room=chat, include_self=False)
 
-@socketio.on('mark_read')
-def mark_read(data):
-    chat = data.get('chat', '')
-    name = data.get('name', '')
-    msg_id = data.get('msg_id', '')
-    if name not in users:
-        return
-    if chat in private_chats:
-        for msg in private_chats[chat]['messages']:
-            if msg['id'] == msg_id and name not in msg.get('read_by', []):
-                msg['read_by'] = msg.get('read_by', []) + [name]
-        save_data()
-        emit('read_update', {'chat': chat, 'msg_id': msg_id, 'read_by': msg['read_by']}, room=chat)
-
-# ============================================================
-#  WEBSOCKET: РЕАКЦИИ И РЕПЛАИ
-# ============================================================
 @socketio.on('message_reaction')
 def message_reaction(data):
     chat = data.get('chat', '')
@@ -602,19 +401,13 @@ def reply_message(data):
         'name': name,
         'type': 'text',
         'content': reply_text,
-        'reply_to': {
-            'id': original['id'],
-            'name': original['name'],
-            'content': original['content'][:100] + ('...' if len(original['content']) > 100 else '')
-        },
+        'reply_to': {'id': original['id'], 'name': original['name'], 'content': original['content'][:100] + ('...' if len(original['content']) > 100 else '')},
         'time': datetime.now().strftime("%H:%M"),
         'timestamp': time.time(),
         'avatar': users[name].get('avatar'),
         'edited': False,
         'reactions': {},
-        'replies': [],
-        'read_by': [name],
-        'views': [name]
+        'read_by': [name]
     }
     if chat in private_chats:
         private_chats[chat]['messages'].append(reply_msg)
@@ -625,9 +418,6 @@ def reply_message(data):
         save_data()
         emit('new_message', {'chat': chat, 'message': reply_msg}, room=chat)
 
-# ============================================================
-#  WEBSOCKET: ПЕРЕСЫЛКА И ЗАКРЕПЛЕНИЕ
-# ============================================================
 @socketio.on('forward_message')
 def forward_message(data):
     chat = data.get('chat', '')
@@ -664,10 +454,8 @@ def forward_message(data):
         'avatar': users[name].get('avatar'),
         'edited': False,
         'reactions': {},
-        'replies': [],
         'forwarded_from': original['name'],
-        'read_by': [name],
-        'views': [name]
+        'read_by': [name]
     }
     private_chats[chat_id]['messages'].append(forward_msg)
     save_data()
@@ -699,325 +487,7 @@ def pin_message(data):
             save_data()
             emit('message_pinned', {'chat': chat, 'msg_id': msg_id, 'pinned': m['is_pinned']}, room=chat)
             break
-# ============================================================
-#  WEBSOCKET: ГРУППОВЫЕ ЧАТЫ
-# ============================================================
-@socketio.on('create_group')
-def create_group(data):
-    name = data.get('name', '')
-    group_name = data.get('group_name', 'Новая группа')
-    members = data.get('members', [])
-    if name not in users:
-        return
-    if len(members) < 2:
-        emit('error', {'message': 'Нужно минимум 2 участника'})
-        return
-    chat_id = f"g_{int(time.time()*1000)}_{random.randint(1000, 9999)}"
-    group_chats[chat_id] = {
-        'name': group_name,
-        'admin': name,
-        'members': [name] + members,
-        'messages': [],
-        'created_at': time.time(),
-        'avatar': None
-    }
-    save_data()
-    join_room(chat_id)
-    for member in [name] + members:
-        if users.get(member, {}).get('sid'):
-            emit('group_created', {'chat_id': chat_id, 'name': group_name, 'members': [name] + members}, room=users[member]['sid'])
-    emit('private_chat', {'chat_id': chat_id, 'user': group_name, 'avatar': None, 'messages': [], 'is_group': True})
 
-@socketio.on('add_group_member')
-def add_group_member(data):
-    chat = data.get('chat', '')
-    name = data.get('name', '')
-    new_member = data.get('member', '')
-    if chat not in group_chats:
-        return
-    if group_chats[chat]['admin'] != name:
-        emit('error', {'message': 'Только админ может добавлять участников'})
-        return
-    if new_member in group_chats[chat]['members']:
-        return
-    if new_member not in users:
-        emit('error', {'message': 'Пользователь не найден'})
-        return
-    group_chats[chat]['members'].append(new_member)
-    save_data()
-    if users.get(new_member, {}).get('sid'):
-        emit('group_updated', {'chat': chat, 'members': group_chats[chat]['members']}, room=users[new_member]['sid'])
-    emit('group_updated', {'chat': chat, 'members': group_chats[chat]['members']}, room=chat)
-
-@socketio.on('remove_group_member')
-def remove_group_member(data):
-    chat = data.get('chat', '')
-    name = data.get('name', '')
-    remove_user = data.get('user', '')
-    if chat not in group_chats:
-        return
-    if group_chats[chat]['admin'] != name:
-        emit('error', {'message': 'Только админ может удалять участников'})
-        return
-    if remove_user not in group_chats[chat]['members']:
-        return
-    if remove_user == group_chats[chat]['admin']:
-        emit('error', {'message': 'Нельзя удалить админа'})
-        return
-    group_chats[chat]['members'].remove(remove_user)
-    save_data()
-    emit('group_updated', {'chat': chat, 'members': group_chats[chat]['members']}, room=chat)
-
-# ============================================================
-#  WEBSOCKET: СТОРИС
-# ============================================================
-@socketio.on('create_story')
-def create_story(data):
-    name = data.get('name', '')
-    content = data.get('content', '')
-    media_type = data.get('type', 'image')
-    if name not in users:
-        return
-    story = {
-        'id': f"s{int(time.time()*1000)}_{random.randint(1000, 9999)}",
-        'name': name,
-        'content': content,
-        'type': media_type,
-        'timestamp': time.time(),
-        'views': []
-    }
-    stories.setdefault(name, []).append(story)
-    if len(stories[name]) > 10:
-        stories[name] = stories[name][-10:]
-    save_data()
-    emit('new_story', {'name': name, 'story': story}, broadcast=True)
-    threading.Timer(86400, lambda: delete_story_after_time(name, story['id'])).start()
-
-def delete_story_after_time(name, story_id):
-    if name in stories:
-        stories[name] = [s for s in stories[name] if s['id'] != story_id]
-        save_data()
-        emit('story_deleted', {'name': name, 'story_id': story_id}, broadcast=True)
-
-@socketio.on('view_story')
-def view_story(data):
-    name = data.get('name', '')
-    story_id = data.get('story_id', '')
-    viewer = data.get('viewer', '')
-    if name in stories:
-        for story in stories[name]:
-            if story['id'] == story_id and viewer not in story['views']:
-                story['views'].append(viewer)
-                save_data()
-                emit('story_viewed', {'name': name, 'story_id': story_id, 'views': story['views']}, broadcast=True)
-                break
-
-# ============================================================
-#  WEBSOCKET: ПОСТЫ (СО ВСЕМИ ФУНКЦИЯМИ)
-# ============================================================
-@socketio.on('create_post')
-def create_post(data):
-    name = data.get('name', '')
-    content = data.get('content', '')
-    media_type = data.get('media_type', 'image')
-    caption = data.get('caption', '')[:500]
-    hashtags = re.findall(r'#(\w+)', caption)
-    if name not in users:
-        return
-    if len(content) > 500000:
-        content = content[:500000]
-    post_id = f"p{int(time.time()*1000)}_{random.randint(1000, 9999)}"
-    posts[post_id] = {
-        'id': post_id,
-        'author': name,
-        'avatar': users[name].get('avatar'),
-        'content': content,
-        'media_type': media_type,
-        'caption': caption,
-        'hashtags': hashtags,
-        'likes': [],
-        'comments': [],
-        'saved_by': [],
-        'reposts': [],
-        'time': datetime.now().strftime("%d.%m.%Y %H:%M"),
-        'timestamp': time.time()
-    }
-    save_data()
-    emit('new_post', {'post': posts[post_id]}, broadcast=True)
-
-@socketio.on('get_posts')
-def get_posts():
-    emit('posts_list', {'posts': list(posts.values())[:50]})
-
-@socketio.on('like_post')
-def like_post(data):
-    post_id = data.get('post_id', '')
-    name = data.get('name', '')
-    if post_id in posts:
-        if name in posts[post_id]['likes']:
-            posts[post_id]['likes'].remove(name)
-        else:
-            posts[post_id]['likes'].append(name)
-        save_data()
-        emit('post_updated', {'post': posts[post_id]}, broadcast=True)
-
-@socketio.on('comment_post')
-def comment_post(data):
-    post_id = data.get('post_id', '')
-    name = data.get('name', '')
-    comment = data.get('comment', '')[:300]
-    if post_id in posts:
-        posts[post_id]['comments'].append({
-            'id': f"c{int(time.time()*1000)}_{random.randint(1000, 9999)}",
-            'name': name,
-            'avatar': users.get(name, {}).get('avatar'),
-            'comment': comment,
-            'time': datetime.now().strftime("%H:%M"),
-            'timestamp': time.time(),
-            'likes': []
-        })
-        save_data()
-        emit('post_updated', {'post': posts[post_id]}, broadcast=True)
-
-@socketio.on('save_post')
-def save_post(data):
-    post_id = data.get('post_id', '')
-    name = data.get('name', '')
-    if post_id in posts:
-        if name in posts[post_id]['saved_by']:
-            posts[post_id]['saved_by'].remove(name)
-        else:
-            posts[post_id]['saved_by'].append(name)
-        save_data()
-        emit('post_updated', {'post': posts[post_id]}, broadcast=True)
-
-@socketio.on('repost_post')
-def repost_post(data):
-    post_id = data.get('post_id', '')
-    name = data.get('name', '')
-    if post_id in posts and name not in posts[post_id]['reposts']:
-        posts[post_id]['reposts'].append(name)
-        save_data()
-        emit('post_updated', {'post': posts[post_id]}, broadcast=True)
-
-# ============================================================
-#  WEBSOCKET: ПРОФИЛЬ (АВАТАР, БИО, РЕДАКТИРОВАНИЕ)
-# ============================================================
-@socketio.on('update_avatar')
-def update_avatar(data):
-    name = data.get('name', '')
-    avatar = data.get('avatar', '')
-    if name in users:
-        users[name]['avatar'] = avatar
-        save_data()
-        emit('avatar_updated', {'name': name, 'avatar': avatar}, broadcast=True)
-
-@socketio.on('update_bio')
-def update_bio(data):
-    name = data.get('name', '')
-    bio = data.get('bio', '')[:200]
-    if name in users:
-        users[name]['bio'] = bio
-        save_data()
-        emit('bio_updated', {'name': name, 'bio': bio})
-
-@socketio.on('update_profile')
-def update_profile(data):
-    name = data.get('name', '')
-    new_name = data.get('new_name', '').strip()
-    new_username = data.get('new_username', '').strip().lower()
-    if name not in users:
-        return
-    if new_name and len(new_name) >= 2 and len(new_name) <= 20:
-        if re.match(r'^[a-zA-Zа-яА-Я0-9_]+$', new_name) and new_name not in users:
-            user_data = users.pop(name)
-            users[new_name] = user_data
-            for chat_id, chat in private_chats.items():
-                if name in chat['users']:
-                    chat['users'] = [new_name if u == name else u for u in chat['users']]
-            for chat_id, chat in group_chats.items():
-                if name in chat['members']:
-                    chat['members'] = [new_name if u == name else u for u in chat['members']]
-                if chat['admin'] == name:
-                    chat['admin'] = new_name
-            save_data()
-            emit('profile_updated', {'old_name': name, 'new_name': new_name}, broadcast=True)
-            return
-    if new_username and len(new_username) >= 3 and len(new_username) <= 20:
-        if re.match(r'^[a-zA-Z0-9_]+$', new_username):
-            for n, u in users.items():
-                if u.get('username') == new_username and n != name:
-                    emit('error', {'message': 'Юзернейм занят'})
-                    return
-            users[name]['username'] = new_username
-            save_data()
-            emit('username_updated', {'name': name, 'username': new_username}, broadcast=True)
-
-# ============================================================
-#  WEBSOCKET: БЛОКИРОВКА
-# ============================================================
-@socketio.on('block_user')
-def block_user(data):
-    name = data.get('name', '')
-    block_name = data.get('block_name', '')
-    if name not in users or block_name not in users:
-        return
-    if block_name not in blocked_users.get(name, []):
-        blocked_users.setdefault(name, []).append(block_name)
-        save_data()
-        emit('user_blocked', {'by': name, 'blocked': block_name}, room=users[block_name].get('sid') if users[block_name].get('sid') else '')
-
-@socketio.on('unblock_user')
-def unblock_user(data):
-    name = data.get('name', '')
-    unblock_name = data.get('unblock_name', '')
-    if name in blocked_users and unblock_name in blocked_users[name]:
-        blocked_users[name].remove(unblock_name)
-        save_data()
-        emit('user_unblocked', {'by': name, 'unblocked': unblock_name}, room=users[unblock_name].get('sid') if users[unblock_name].get('sid') else '')
-
-# ============================================================
-#  WEBSOCKET: ПОИСК
-# ============================================================
-@socketio.on('search_users')
-def search_users(data):
-    query = data.get('query', '').lower()
-    name = data.get('name', '')
-    results = []
-    for n, u in users.items():
-        if n != name and n not in blocked_users.get(name, []):
-            if query in n.lower() or query in u.get('username', '').lower():
-                results.append({'name': n, 'username': u.get('username', n), 'avatar': u.get('avatar'), 'status': u.get('status', 'offline')})
-    emit('search_results', {'results': results[:20]})
-
-@socketio.on('search_hashtag')
-def search_hashtag(data):
-    tag = data.get('tag', '').lower()
-    results = []
-    for post in list(posts.values()):
-        if tag in [h.lower() for h in post.get('hashtags', [])]:
-            results.append(post)
-    emit('search_results', {'posts': results[:30]})
-
-@socketio.on('search_messages')
-def search_messages(data):
-    chat = data.get('chat', '')
-    query = data.get('query', '').lower()
-    name = data.get('name', '')
-    if name not in users:
-        return
-    msgs = []
-    if chat in private_chats:
-        msgs = private_chats[chat]['messages']
-    elif chat in group_chats:
-        msgs = group_chats[chat]['messages']
-    else:
-        return
-    results = [m for m in msgs if query in m['content'].lower()]
-    emit('search_results', {'messages': results[:50]})
-# ============================================================
-#  WEBSOCKET: УДАЛЕНИЕ И РЕДАКТИРОВАНИЕ
-# ============================================================
 @socketio.on('delete_message')
 def delete_message(data):
     chat = data.get('chat', '')
@@ -1065,8 +535,253 @@ def edit_message(data):
             break
 
 # ============================================================
-#  WEBSOCKET: ПОЛЬЗОВАТЕЛИ И ЧАТЫ
+#  WEBSOCKET: ГРУППЫ, СТОРИС, ПОСТЫ
 # ============================================================
+@socketio.on('create_group')
+def create_group(data):
+    name = data.get('name', '')
+    group_name = data.get('group_name', 'Новая группа')
+    members = data.get('members', [])
+    if name not in users or len(members) < 2:
+        emit('error', {'message': 'Нужно минимум 2 участника'})
+        return
+    chat_id = f"g_{int(time.time()*1000)}_{random.randint(1000, 9999)}"
+    group_chats[chat_id] = {'name': group_name, 'admin': name, 'members': [name] + members, 'messages': [], 'created_at': time.time(), 'avatar': None}
+    save_data()
+    join_room(chat_id)
+    for member in [name] + members:
+        if users.get(member, {}).get('sid'):
+            emit('group_created', {'chat_id': chat_id, 'name': group_name, 'members': [name] + members}, room=users[member]['sid'])
+    emit('private_chat', {'chat_id': chat_id, 'user': group_name, 'avatar': None, 'messages': [], 'is_group': True})
+
+@socketio.on('add_group_member')
+def add_group_member(data):
+    chat = data.get('chat', '')
+    name = data.get('name', '')
+    new_member = data.get('member', '')
+    if chat not in group_chats or group_chats[chat]['admin'] != name or new_member not in users:
+        return
+    if new_member not in group_chats[chat]['members']:
+        group_chats[chat]['members'].append(new_member)
+        save_data()
+        if users.get(new_member, {}).get('sid'):
+            emit('group_updated', {'chat': chat, 'members': group_chats[chat]['members']}, room=users[new_member]['sid'])
+        emit('group_updated', {'chat': chat, 'members': group_chats[chat]['members']}, room=chat)
+
+@socketio.on('remove_group_member')
+def remove_group_member(data):
+    chat = data.get('chat', '')
+    name = data.get('name', '')
+    remove_user = data.get('user', '')
+    if chat not in group_chats or group_chats[chat]['admin'] != name or remove_user not in group_chats[chat]['members'] or remove_user == group_chats[chat]['admin']:
+        return
+    group_chats[chat]['members'].remove(remove_user)
+    save_data()
+    emit('group_updated', {'chat': chat, 'members': group_chats[chat]['members']}, room=chat)
+
+@socketio.on('create_story')
+def create_story(data):
+    name = data.get('name', '')
+    content = data.get('content', '')
+    media_type = data.get('type', 'image')
+    if name not in users:
+        return
+    story = {'id': f"s{int(time.time()*1000)}_{random.randint(1000, 9999)}", 'name': name, 'content': content, 'type': media_type, 'timestamp': time.time(), 'views': []}
+    stories.setdefault(name, []).append(story)
+    if len(stories[name]) > 10:
+        stories[name] = stories[name][-10:]
+    save_data()
+    emit('new_story', {'name': name, 'story': story}, broadcast=True)
+    threading.Timer(86400, lambda: delete_story_after_time(name, story['id'])).start()
+
+def delete_story_after_time(name, story_id):
+    if name in stories:
+        stories[name] = [s for s in stories[name] if s['id'] != story_id]
+        save_data()
+        emit('story_deleted', {'name': name, 'story_id': story_id}, broadcast=True)
+
+@socketio.on('view_story')
+def view_story(data):
+    name = data.get('name', '')
+    story_id = data.get('story_id', '')
+    viewer = data.get('viewer', '')
+    if name in stories:
+        for story in stories[name]:
+            if story['id'] == story_id and viewer not in story['views']:
+                story['views'].append(viewer)
+                save_data()
+                emit('story_viewed', {'name': name, 'story_id': story_id, 'views': story['views']}, broadcast=True)
+                break
+
+@socketio.on('create_post')
+def create_post(data):
+    name = data.get('name', '')
+    content = data.get('content', '')
+    media_type = data.get('media_type', 'image')
+    caption = data.get('caption', '')[:500]
+    hashtags = re.findall(r'#(\w+)', caption)
+    if name not in users or len(content) > 500000:
+        return
+    post_id = f"p{int(time.time()*1000)}_{random.randint(1000, 9999)}"
+    posts[post_id] = {'id': post_id, 'author': name, 'avatar': users[name].get('avatar'), 'content': content, 'media_type': media_type, 'caption': caption, 'hashtags': hashtags, 'likes': [], 'comments': [], 'saved_by': [], 'reposts': [], 'time': datetime.now().strftime("%d.%m.%Y %H:%M"), 'timestamp': time.time()}
+    save_data()
+    emit('new_post', {'post': posts[post_id]}, broadcast=True)
+
+@socketio.on('get_posts')
+def get_posts():
+    emit('posts_list', {'posts': list(posts.values())[:50]})
+
+@socketio.on('like_post')
+def like_post(data):
+    post_id = data.get('post_id', '')
+    name = data.get('name', '')
+    if post_id in posts:
+        if name in posts[post_id]['likes']:
+            posts[post_id]['likes'].remove(name)
+        else:
+            posts[post_id]['likes'].append(name)
+        save_data()
+        emit('post_updated', {'post': posts[post_id]}, broadcast=True)
+
+@socketio.on('comment_post')
+def comment_post(data):
+    post_id = data.get('post_id', '')
+    name = data.get('name', '')
+    comment = data.get('comment', '')[:300]
+    if post_id in posts:
+        posts[post_id]['comments'].append({'id': f"c{int(time.time()*1000)}_{random.randint(1000, 9999)}", 'name': name, 'avatar': users.get(name, {}).get('avatar'), 'comment': comment, 'time': datetime.now().strftime("%H:%M"), 'timestamp': time.time(), 'likes': []})
+        save_data()
+        emit('post_updated', {'post': posts[post_id]}, broadcast=True)
+
+@socketio.on('save_post')
+def save_post(data):
+    post_id = data.get('post_id', '')
+    name = data.get('name', '')
+    if post_id in posts:
+        if name in posts[post_id]['saved_by']:
+            posts[post_id]['saved_by'].remove(name)
+        else:
+            posts[post_id]['saved_by'].append(name)
+        save_data()
+        emit('post_updated', {'post': posts[post_id]}, broadcast=True)
+
+@socketio.on('repost_post')
+def repost_post(data):
+    post_id = data.get('post_id', '')
+    name = data.get('name', '')
+    if post_id in posts and name not in posts[post_id]['reposts']:
+        posts[post_id]['reposts'].append(name)
+        save_data()
+        emit('post_updated', {'post': posts[post_id]}, broadcast=True)
+
+# ============================================================
+#  WEBSOCKET: ПРОФИЛЬ, БЛОКИРОВКА, ПОИСК, ЧАТЫ
+# ============================================================
+@socketio.on('update_avatar')
+def update_avatar(data):
+    name = data.get('name', '')
+    avatar = data.get('avatar', '')
+    if name in users:
+        users[name]['avatar'] = avatar
+        save_data()
+        emit('avatar_updated', {'name': name, 'avatar': avatar}, broadcast=True)
+
+@socketio.on('update_bio')
+def update_bio(data):
+    name = data.get('name', '')
+    bio = data.get('bio', '')[:200]
+    if name in users:
+        users[name]['bio'] = bio
+        save_data()
+        emit('bio_updated', {'name': name, 'bio': bio})
+
+@socketio.on('update_profile')
+def update_profile(data):
+    name = data.get('name', '')
+    new_name = data.get('new_name', '').strip()
+    new_username = data.get('new_username', '').strip().lower()
+    if name not in users:
+        return
+    if new_name and len(new_name) >= 2 and len(new_name) <= 20 and re.match(r'^[a-zA-Zа-яА-Я0-9_]+$', new_name) and new_name not in users:
+        user_data = users.pop(name)
+        users[new_name] = user_data
+        for chat_id, chat in private_chats.items():
+            if name in chat['users']:
+                chat['users'] = [new_name if u == name else u for u in chat['users']]
+        for chat_id, chat in group_chats.items():
+            if name in chat['members']:
+                chat['members'] = [new_name if u == name else u for u in chat['members']]
+            if chat['admin'] == name:
+                chat['admin'] = new_name
+        save_data()
+        emit('profile_updated', {'old_name': name, 'new_name': new_name}, broadcast=True)
+        return
+    if new_username and len(new_username) >= 3 and len(new_username) <= 20 and re.match(r'^[a-zA-Z0-9_]+$', new_username):
+        for n, u in users.items():
+            if u.get('username') == new_username and n != name:
+                emit('error', {'message': 'Юзернейм занят'})
+                return
+        users[name]['username'] = new_username
+        save_data()
+        emit('username_updated', {'name': name, 'username': new_username}, broadcast=True)
+
+@socketio.on('block_user')
+def block_user(data):
+    name = data.get('name', '')
+    block_name = data.get('block_name', '')
+    if name not in users or block_name not in users:
+        return
+    if block_name not in blocked_users.get(name, []):
+        blocked_users.setdefault(name, []).append(block_name)
+        save_data()
+        emit('user_blocked', {'by': name, 'blocked': block_name}, room=users[block_name].get('sid') if users[block_name].get('sid') else '')
+
+@socketio.on('unblock_user')
+def unblock_user(data):
+    name = data.get('name', '')
+    unblock_name = data.get('unblock_name', '')
+    if name in blocked_users and unblock_name in blocked_users[name]:
+        blocked_users[name].remove(unblock_name)
+        save_data()
+        emit('user_unblocked', {'by': name, 'unblocked': unblock_name}, room=users[unblock_name].get('sid') if users[unblock_name].get('sid') else '')
+
+@socketio.on('search_users')
+def search_users(data):
+    query = data.get('query', '').lower()
+    name = data.get('name', '')
+    results = []
+    for n, u in users.items():
+        if n != name and n not in blocked_users.get(name, []):
+            if query in n.lower() or query in u.get('username', '').lower():
+                results.append({'name': n, 'username': u.get('username', n), 'avatar': u.get('avatar'), 'status': u.get('status', 'offline')})
+    emit('search_results', {'results': results[:20]})
+
+@socketio.on('search_hashtag')
+def search_hashtag(data):
+    tag = data.get('tag', '').lower()
+    results = []
+    for post in list(posts.values()):
+        if tag in [h.lower() for h in post.get('hashtags', [])]:
+            results.append(post)
+    emit('search_results', {'posts': results[:30]})
+
+@socketio.on('search_messages')
+def search_messages(data):
+    chat = data.get('chat', '')
+    query = data.get('query', '').lower()
+    name = data.get('name', '')
+    if name not in users:
+        return
+    msgs = []
+    if chat in private_chats:
+        msgs = private_chats[chat]['messages']
+    elif chat in group_chats:
+        msgs = group_chats[chat]['messages']
+    else:
+        return
+    results = [m for m in msgs if query in m['content'].lower()]
+    emit('search_results', {'messages': results[:50]})
+
 @socketio.on('logout')
 def logout(data):
     token = data.get('token', '')
@@ -1086,23 +801,14 @@ def get_users(data):
     user_list = []
     for n, u in users.items():
         if n != name and n not in blocked_users.get(name, []):
-            user_list.append({
-                'name': n,
-                'username': u.get('username', n),
-                'avatar': u.get('avatar'),
-                'status': u.get('status', 'offline'),
-                'bio': u.get('bio', ''),
-                'last_seen': u.get('last_seen', 0)
-            })
+            user_list.append({'name': n, 'username': u.get('username', n), 'avatar': u.get('avatar'), 'status': u.get('status', 'offline'), 'bio': u.get('bio', ''), 'last_seen': u.get('last_seen', 0)})
     emit('users_list', {'users': user_list})
 
 @socketio.on('start_private_chat')
 def start_private_chat(data):
     user1 = data.get('user1', '')
     user2 = data.get('user2', '')
-    if user1 not in users or user2 not in users:
-        return
-    if is_blocked(user1, user2):
+    if user1 not in users or user2 not in users or is_blocked(user1, user2):
         emit('error', {'message': 'Вы заблокированы'})
         return
     chat_id = f"p_{min(user1, user2)}_{max(user1, user2)}"
@@ -1113,13 +819,7 @@ def start_private_chat(data):
     if user1 in unread:
         unread[user1][chat_id] = 0
     msgs = private_chats[chat_id]['messages'][-200:]
-    emit('private_chat', {
-        'chat_id': chat_id,
-        'user': user2,
-        'avatar': users[user2].get('avatar'),
-        'messages': msgs,
-        'is_group': False
-    })
+    emit('private_chat', {'chat_id': chat_id, 'user': user2, 'avatar': users[user2].get('avatar'), 'messages': msgs, 'is_group': False})
 
 @socketio.on('share_link')
 def share_link():
@@ -1128,7 +828,6 @@ def share_link():
 
 # ============================================================
 #  HTML (ВЕСЬ КОД СТРАНИЦЫ — CSS, HTML, JAVASCRIPT)
-#  ВНИМАНИЕ: ЭТО ОГРОМНАЯ СТРОКА
 # ============================================================
 HTML = '''<!DOCTYPE html>
 <html lang="ru">
@@ -1137,38 +836,19 @@ HTML = '''<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>DirectMe</title>
 <style>
-* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+* { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
 :root {
-    --bg: #0a0a0a;
-    --bg-secondary: #141414;
-    --bg-card: #1a1a1a;
-    --bg-input: #242424;
-    --bg-hover: #2a2a2a;
-    --primary: #FFD700;
-    --primary-dark: #B8960F;
-    --primary-light: #FFE44D;
+    --bg: #0a0a0a; --bg-secondary: #141414; --bg-card: #1a1a1a; --bg-input: #242424; --bg-hover: #2a2a2a;
+    --primary: #FFD700; --primary-dark: #B8960F; --primary-light: #FFE44D;
     --primary-gradient: linear-gradient(135deg, #FFD700, #FFA500);
-    --text: #ffffff;
-    --text-secondary: #8e8e93;
-    --text-muted: #636366;
-    --border: #2c2c2e;
-    --shadow: rgba(255, 215, 0, 0.15);
-    --bubble-self: #FFD700;
-    --bubble-other: #1c1c1e;
-    --radius: 16px;
-    --radius-sm: 10px;
+    --text: #ffffff; --text-secondary: #8e8e93; --text-muted: #636366;
+    --border: #2c2c2e; --shadow: rgba(255,215,0,0.15);
+    --bubble-self: #FFD700; --bubble-other: #1c1c1e; --radius: 16px; --radius-sm: 10px;
 }
 body.light {
-    --bg: #f2f2f7;
-    --bg-secondary: #ffffff;
-    --bg-card: #e5e5ea;
-    --bg-input: #e5e5ea;
-    --bg-hover: #d1d1d6;
-    --text: #000000;
-    --text-secondary: #3a3a3c;
-    --text-muted: #8e8e93;
-    --border: #c6c6c8;
-    --bubble-other: #e5e5ea;
+    --bg: #f2f2f7; --bg-secondary: #ffffff; --bg-card: #e5e5ea; --bg-input: #e5e5ea;
+    --bg-hover: #d1d1d6; --text: #000000; --text-secondary: #3a3a3c;
+    --text-muted: #8e8e93; --border: #c6c6c8; --bubble-other: #e5e5ea;
 }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, system-ui, sans-serif; background: var(--bg); color: var(--text); height: 100vh; height: 100dvh; overflow: hidden; display: flex; justify-content: center; align-items: center; user-select: none; }
 ::-webkit-scrollbar { width: 3px; }
@@ -1321,7 +1001,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
 .story-circle { width: 56px; height: 56px; border-radius: 50%; flex-shrink: 0; padding: 2px; background: var(--primary-gradient); cursor: pointer; }
 .story-circle-inner { width: 100%; height: 100%; border-radius: 50%; overflow: hidden; border: 2px solid var(--bg); }
 .story-circle-inner img { width: 100%; height: 100%; object-fit: cover; }
-.story-circle-inner .story-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; background: var(--bg-input); font-size: 20px; font-weight: 600; color: var(--primary); }
 .story-name { font-size: 10px; color: var(--text-secondary); text-align: center; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 56px; }
 @media (max-width: 480px) { .msg { max-width: 92%; } .msg-bubble img, .msg-bubble video { max-width: 150px; } .push-notification { min-width: unset; width: 92%; } }
 </style>
@@ -1420,34 +1099,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
         <div id="loginStep1">
             <svg class="login-logo" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             <h1>DirectMe</h1>
-            <p>Введите номер телефона</p>
-            <input class="form-input" id="phoneInput" placeholder="+7 999 123-45-67" type="tel">
-            <button class="form-btn" onclick="requestCode()" type="button">Получить код</button>
-        </div>
-        <div id="loginStep2" class="hidden">
-            <svg class="login-logo" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-            <h1>Код</h1>
-            <p>Отправлен на <span id="phoneDisplay" style="color:var(--primary)"></span></p>
-            <div class="code-box" id="codeDisplay">000000</div>
-            <input class="form-input" id="codeInput" placeholder="••••••" maxlength="6" style="font-size:20px;letter-spacing:6px">
-            <button class="form-btn" onclick="verifyCode()" type="button">Подтвердить</button>
-            <button class="form-link" onclick="backToPhone()">Изменить номер</button>
-        </div>
-        <div id="loginStep3" class="hidden">
-            <svg class="login-logo" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-            <h1>Регистрация</h1>
-            <input class="form-input" id="regName" placeholder="Имя (2-20 символов)">
-            <input class="form-input" id="regUsername" placeholder="Юзернейм (3-20 символов, латиница)">
+            <p>Введите юзернейм и пароль</p>
+            <input class="form-input" id="regUsername" placeholder="Юзернейм (латиница, 3-20 символов)">
             <input class="form-input" id="regPassword" placeholder="Пароль (мин. 4)" type="password">
-            <button class="form-btn" onclick="registerUser()" type="button">Зарегистрироваться</button>
-        </div>
-        <div id="loginStep4" class="hidden">
-            <svg class="login-logo" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-            <h1>Вход</h1>
-            <p id="loginName" style="color:var(--primary);font-weight:600"></p>
-            <input class="form-input" id="loginPassword" placeholder="Пароль" type="password">
-            <button class="form-btn" onclick="loginUser()" type="button">Войти</button>
-            <button class="form-link" onclick="backToStart()">Назад</button>
+            <button class="form-btn" onclick="loginOrRegister()" type="button">Войти / Зарегистрироваться</button>
         </div>
     </div>
 </div>
@@ -1461,7 +1116,7 @@ let currentUser = null, currentToken = null, currentChat = null, currentChatName
 let currentAvatar = null, currentBio = '', currentUsername = '', typingTimeout = null;
 let isChatOpen = false, isRecording = false, mediaRecorder = null, audioChunks = [];
 let unreadData = {}, privateChats = JSON.parse(localStorage.getItem('private_chats') || '[]');
-let pushData = null, pushTimeout = null, currentPhone = '', currentLoginName = '';
+let pushData = null, pushTimeout = null;
 
 const $ = id => document.getElementById(id);
 const chatList = $('chatList'), usersList = $('usersList'), postsList = $('postsList');
@@ -1501,60 +1156,45 @@ function showPush(from, content, chatId) {
 function closePush() { const el = $('pushNotification'); if (el) el.classList.remove('show'); pushData = null; }
 function openChatFromPush() { if (pushData) { closePush(); openPrivateChat(pushData.chatId, pushData.from); } }
 
-function requestCode() {
-    const phone = $('phoneInput').value.trim();
-    if (phone.length < 10) { showToast('Введите корректный номер'); return; }
-    socket.emit('register', { phone });
+function loginOrRegister() {
+    var username = document.getElementById('regUsername').value.trim().toLowerCase();
+    var password = document.getElementById('regPassword').value.trim();
+
+    if (!username || username.length < 3 || username.length > 20) {
+        showToast('Юзернейм 3-20 символов (латиница, цифры, _)');
+        return;
+    }
+    if (!/^[a-zA-Z0-9_]+$/.test(username)) {
+        showToast('Юзернейм: только латиница, цифры, _');
+        return;
+    }
+    if (password.length < 4) {
+        showToast('Пароль минимум 4 символа');
+        return;
+    }
+
+    // Пытаемся войти
+    socket.emit('login', { username: username, password: password });
+    
+    // Если пользователь не существует — создаём
+    var registered = false;
+    socket.once('login_success', function() { registered = true; });
+    socket.once('error', function(data) {
+        if (data.message === 'Пользователь не найден' && !registered) {
+            socket.emit('register', { username: username, password: password });
+        }
+    });
 }
 
-function verifyCode() {
-    const code = $('codeInput').value.trim();
-    if (code.length !== 6) { showToast('Введите 6 цифр'); return; }
-    socket.emit('verify_code', { phone: currentPhone, code });
+function showToast(msg) {
+    const el = document.createElement('div');
+    el.className = 'toast';
+    el.textContent = msg;
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 2500);
 }
 
-function registerUser() {
-    const name = $('regName').value.trim(), username = $('regUsername').value.trim().toLowerCase(), password = $('regPassword').value.trim();
-    if (!name || name.length < 2 || name.length > 20) { showToast('Имя 2-20 символов'); return; }
-    if (!/^[a-zA-Zа-яА-Я0-9_]+$/.test(name)) { showToast('Недопустимые символы'); return; }
-    if (!username || username.length < 3 || username.length > 20) { showToast('Юзернейм 3-20 символов'); return; }
-    if (!/^[a-zA-Z0-9_]+$/.test(username)) { showToast('Юзернейм только латиница'); return; }
-    if (password.length < 4) { showToast('Пароль минимум 4'); return; }
-    socket.emit('create_user', { phone: currentPhone, name, username, password });
-}
-
-function loginUser() {
-    const password = $('loginPassword').value.trim();
-    if (!password) { showToast('Введите пароль'); return; }
-    socket.emit('login', { name: currentLoginName, password });
-}
-
-function backToPhone() { $('loginStep2').classList.add('hidden'); $('loginStep1').classList.remove('hidden'); }
-function backToStart() { $('loginStep4').classList.add('hidden'); $('loginStep1').classList.remove('hidden'); }
-function showToast(msg) { const el = document.createElement('div'); el.className = 'toast'; el.textContent = msg; document.body.appendChild(el); setTimeout(() => el.remove(), 2500); }
-
-socket.on('code_sent', (data) => {
-    currentPhone = data.phone;
-    $('loginStep1').classList.add('hidden');
-    $('loginStep2').classList.remove('hidden');
-    $('phoneDisplay').textContent = '+' + data.phone;
-    $('codeDisplay').textContent = data.code;
-});
-
-socket.on('user_exists', (data) => {
-    currentLoginName = data.name;
-    $('loginStep2').classList.add('hidden');
-    $('loginStep4').classList.remove('hidden');
-    $('loginName').textContent = data.name;
-});
-
-socket.on('new_user', (data) => {
-    currentPhone = data.phone;
-    $('loginStep2').classList.add('hidden');
-    $('loginStep3').classList.remove('hidden');
-});
-
-socket.on('login_success', (data) => {
+socket.on('login_success', function(data) {
     currentUser = data.name;
     currentToken = data.token;
     currentAvatar = data.avatar;
@@ -1565,7 +1205,9 @@ socket.on('login_success', (data) => {
     enterApp();
 });
 
-socket.on('error', (data) => { showToast(data.message); });
+socket.on('error', function(data) {
+    showToast(data.message);
+});
 
 socket.on('push_notification', (data) => {
     showPush(data.from, data.content, data.chat_id);
@@ -2239,23 +1881,9 @@ document.addEventListener('keydown', (e) => {
 
 console.log('💬 DirectMe загружен!');
 </script>
-// ПРОВЕРКА И ПРИНУДИТЕЛЬНАЯ ЗАГРУЗКА
-if (typeof io === 'undefined') {
-    document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.min.js"><\/script>');
-}
-if (typeof requestCode !== 'function') {
-    requestCode = function() {
-        var phone = document.getElementById('phoneInput').value.trim();
-        if (phone.length < 10) { showToast('Введите корректный номер'); return; }
-        socket.emit('register', { phone: phone });
-    };
-}
-console.log('✅ Все функции загружены!');
-</script>
 </body>
 </html>
-'''   # <--- ЗАКРЫВАЕМ HTML
-
+'''
 
 
 # ============================================================
