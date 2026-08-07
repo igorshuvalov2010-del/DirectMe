@@ -2239,9 +2239,23 @@ document.addEventListener('keydown', (e) => {
 
 console.log('💬 DirectMe загружен!');
 </script>
+// ПРОВЕРКА И ПРИНУДИТЕЛЬНАЯ ЗАГРУЗКА
+if (typeof io === 'undefined') {
+    document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.min.js"><\/script>');
+}
+if (typeof requestCode !== 'function') {
+    requestCode = function() {
+        var phone = document.getElementById('phoneInput').value.trim();
+        if (phone.length < 10) { showToast('Введите корректный номер'); return; }
+        socket.emit('register', { phone: phone });
+    };
+}
+console.log('✅ Все функции загружены!');
+</script>
 </body>
 </html>
-'''
+'''   # <--- ЗАКРЫВАЕМ HTML
+
 
 
 # ============================================================
