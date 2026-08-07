@@ -917,7 +917,8 @@ def start_private_chat(data):
 @socketio.on('share_link')
 def share_link():
     emit('share_link', {'url': request.host})
-HTML='''<!DOCTYPE html>
+HTML='''
+<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
