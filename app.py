@@ -3,10 +3,9 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 from datetime import datetime
 import random, time, os, hashlib, json, re
 from functools import wraps
-from cryptography.fernet import Fernet
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'directme-secret-key')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'shugramm-secret-key')
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=100*1024*1024)
 
 # ========== ДАННЫЕ ==========
@@ -37,13 +36,13 @@ def save_data():
         'private_chats': private_chats,
         'unread': unread
     }
-    with open('directme_data.json', 'w') as f:
+    with open('shugramm_data.json', 'w') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def load_data():
     global users, posts, groups, private_chats, unread
     try:
-        with open('directme_data.json', 'r') as f:
+        with open('shugramm_data.json', 'r') as f:
             data = json.load(f)
             users = data.get('users', {})
             posts = data.get('posts', [])
@@ -55,42 +54,10 @@ def load_data():
 
 load_data()
 
-# ========== ДЕКОРАТОРЫ ==========
-def auth_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = request.headers.get('X-Auth-Token') or request.args.get('token')
-        if not token:
-            return jsonify({'error': 'Требуется авторизация'}), 401
-        for name, user in users.items():
-            if user.get('token') == token:
-                return f(user=user, name=name, *args, **kwargs)
-        return jsonify({'error': 'Недействительный токен'}), 401
-    return decorated
-
 # ========== HTTP РОУТЫ ==========
 @app.route('/')
 def index():
     return render_template_string(HTML)
-
-@app.route('/api/posts')
-@auth_required
-def get_posts_api(user, name):
-    return jsonify({'posts': posts[:30]})
-
-@app.route('/api/users')
-@auth_required
-def get_users_api(user, name):
-    user_list = []
-    for n, u in users.items():
-        if n != name:
-            user_list.append({
-                'name': n,
-                'avatar': u.get('avatar'),
-                'status': u.get('status', 'offline'),
-                'bio': u.get('bio', '')
-            })
-    return jsonify({'users': user_list})
 
 @app.route('/delete_post', methods=['POST'])
 def delete_post():
@@ -108,7 +75,7 @@ def delete_post():
 # ========== SOCKET.IO СОБЫТИЯ ==========
 @socketio.on('connect')
 def handle_connect():
-    print(f"✅ Клиент подключен: {request.sid}")
+    print(f"✅ Client connected: {request.sid}")
 
 @socketio.on('disconnect')
 def handle_disconnect():
@@ -119,17 +86,16 @@ def handle_disconnect():
             emit('user_status', {'name': name, 'status': 'offline'}, broadcast=True)
             save_data()
             break
-    print(f"❌ Клиент отключен: {request.sid}")
 
 @socketio.on('register')
 def register(data):
     phone = ''.join(filter(str.isdigit, data.get('phone', '')))
     if len(phone) < 10:
-        emit('error', {'message': 'Введите корректный номер телефона'})
+        emit('error', {'message': 'Введите корректный номер'})
         return
     code = str(random.randint(100000, 999999))
     pending[phone] = {'code': code, 'time': time.time()}
-    print(f"📱 Код для {phone}: {code}")
+    print(f"📱 Code for {phone}: {code}")
     emit('code_sent', {'phone': phone, 'code': code})
 
 @socketio.on('verify_code')
@@ -160,10 +126,10 @@ def create_user(data):
     password = data.get('password', '')
     
     if not name or len(name) < 2 or len(name) > 20:
-        emit('error', {'message': 'Имя должно быть от 2 до 20 символов'})
+        emit('error', {'message': 'Имя 2-20 символов'})
         return
     if not re.match(r'^[a-zA-Zа-яА-Я0-9_]+$', name):
-        emit('error', {'message': 'Имя содержит недопустимые символы'})
+        emit('error', {'message': 'Недопустимые символы'})
         return
     if name in users:
         emit('error', {'message': 'Пользователь уже существует'})
@@ -261,13 +227,36 @@ def send_message(data):
     save_data()
     emit('new_message', {'chat': chat, 'message': msg}, room=chat)
     
+    # Уведомления и непрочитанные
+    chat_name = chat
     if chat in private_chats:
         for member in private_chats[chat]['users']:
             if member != name:
                 unread.setdefault(member, {})
                 unread[member][chat] = unread[member].get(chat, 0) + 1
                 if users.get(member, {}).get('sid'):
-                    emit('unread_update', {'chat': chat, 'count': unread[member][chat]}, room=users[member]['sid'])
+                    emit('unread_update', {'chat': chat, 'count': unread[member][chat], 'name': chat_name}, room=users[member]['sid'])
+                    # Push уведомление
+                    emit('push_notification', {
+                        'title': name,
+                        'body': content[:100] if msg_type == 'text' else '📎 Медиа',
+                        'chat': chat,
+                        'sender': name
+                    }, room=users[member]['sid'])
+    else:
+        # Общий чат - уведомления для всех
+        for member in groups[chat]['members']:
+            if member != name:
+                unread.setdefault(member, {})
+                unread[member][chat] = unread[member].get(chat, 0) + 1
+                if users.get(member, {}).get('sid'):
+                    emit('unread_update', {'chat': chat, 'count': unread[member][chat], 'name': 'Общий чат'}, room=users[member]['sid'])
+                    emit('push_notification', {
+                        'title': name,
+                        'body': content[:100] if msg_type == 'text' else '📎 Медиа',
+                        'chat': chat,
+                        'sender': name
+                    }, room=users[member]['sid'])
 
 @socketio.on('join_chat')
 def join_chat(data):
@@ -474,13 +463,14 @@ def edit_message(data):
 def share_link():
     emit('share_link', {'url': request.host})
 
-# ========== HTML (ВЕСЬ HTML КОД В ОДНОЙ СТРОКЕ) ==========
-HTML = '''<!DOCTYPE html>
+# ========== HTML ==========
+HTML = '''
+<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<title>DirectMe - Мессенджер</title>
+<title>Shugramm</title>
 <style>
 * {
     margin: 0;
@@ -515,6 +505,7 @@ body {
     align-items: center;
 }
 
+/* ===== SCROLLBAR ===== */
 ::-webkit-scrollbar {
     width: 4px;
 }
@@ -525,10 +516,8 @@ body {
     background: var(--gold);
     border-radius: 4px;
 }
-::-webkit-scrollbar-thumb:hover {
-    background: var(--gold-dark);
-}
 
+/* ===== APP ===== */
 #app {
     width: 100%;
     max-width: 480px;
@@ -541,15 +530,16 @@ body {
     overflow: hidden;
 }
 
+/* ===== HEADER ===== */
 .header {
     background: var(--bg2);
-    padding: 10px 16px;
+    padding: 8px 16px;
     display: flex;
     align-items: center;
     justify-content: space-between;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
-    min-height: 50px;
+    min-height: 48px;
     z-index: 10;
 }
 
@@ -559,24 +549,15 @@ body {
     gap: 8px;
 }
 
-.logo {
-    color: var(--gold);
-    font-size: 20px;
-    font-weight: 800;
-}
-
-.logo-icon {
-    font-size: 24px;
-}
-
 .header-title {
     font-size: 17px;
     font-weight: 600;
+    color: var(--gold);
 }
 
 .header-right {
     display: flex;
-    gap: 4px;
+    gap: 2px;
 }
 
 .btn {
@@ -586,7 +567,6 @@ body {
     padding: 6px;
     border-radius: 50%;
     cursor: pointer;
-    font-size: 18px;
     width: 34px;
     height: 34px;
     display: flex;
@@ -605,6 +585,18 @@ body {
     background: rgba(255, 215, 0, 0.1);
 }
 
+/* ===== ICONS ===== */
+.icon {
+    width: 20px;
+    height: 20px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+/* ===== NAV ===== */
 .nav {
     background: var(--bg2);
     display: flex;
@@ -619,26 +611,26 @@ body {
     flex-direction: column;
     align-items: center;
     gap: 2px;
-    padding: 6px 0;
+    padding: 6px 0 8px;
     cursor: pointer;
     color: var(--text-secondary);
-    font-size: 10px;
+    font-size: 9px;
     transition: color 0.2s;
     position: relative;
+    border: none;
+    background: none;
 }
-
 .nav-item.active {
     color: var(--gold);
 }
-
 .nav-item .icon {
-    font-size: 20px;
+    width: 22px;
+    height: 22px;
 }
 .nav-item .label {
     font-size: 9px;
     font-weight: 500;
 }
-
 .nav-item .badge {
     position: absolute;
     top: 2px;
@@ -657,6 +649,7 @@ body {
     padding: 0 4px;
 }
 
+/* ===== PAGES ===== */
 .page {
     flex: 1;
     overflow-y: auto;
@@ -669,6 +662,7 @@ body {
     display: block;
 }
 
+/* ===== CHAT LIST ===== */
 .chat-item {
     display: flex;
     align-items: center;
@@ -677,6 +671,7 @@ body {
     cursor: pointer;
     transition: background 0.15s;
     border-bottom: 1px solid rgba(255,255,255,0.03);
+    position: relative;
 }
 .chat-item:active {
     background: var(--bg3);
@@ -720,9 +715,20 @@ body {
 .chat-name {
     font-size: 15px;
     font-weight: 500;
-    display: flex;
-    align-items: center;
-    gap: 6px;
+}
+.chat-name .unread-badge {
+    display: inline-block;
+    background: var(--gold);
+    color: #000;
+    font-size: 10px;
+    font-weight: 700;
+    min-width: 18px;
+    height: 18px;
+    border-radius: 9px;
+    text-align: center;
+    line-height: 18px;
+    padding: 0 5px;
+    margin-left: 6px;
 }
 .chat-last {
     font-size: 13px;
@@ -738,21 +744,7 @@ body {
     margin-left: 8px;
 }
 
-.chat-unread {
-    background: var(--gold);
-    color: #000;
-    font-size: 10px;
-    font-weight: 700;
-    min-width: 18px;
-    height: 18px;
-    border-radius: 9px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0 5px;
-    margin-left: auto;
-}
-
+/* ===== MESSAGES ===== */
 #chatWindow {
     display: none;
     flex: 1;
@@ -798,6 +790,7 @@ body {
     background: var(--gold);
     overflow: hidden;
     margin-top: auto;
+    cursor: pointer;
 }
 .msg-avatar img {
     width: 100%;
@@ -869,6 +862,7 @@ body {
     to { opacity: 1; transform: translateY(0); }
 }
 
+/* ===== TYPING ===== */
 .typing-indicator {
     font-size: 12px;
     color: var(--text-secondary);
@@ -882,6 +876,7 @@ body {
     opacity: 1;
 }
 
+/* ===== INPUT BAR ===== */
 .input-bar {
     display: flex;
     padding: 6px 10px;
@@ -908,9 +903,6 @@ body {
 .input-bar input::placeholder {
     color: var(--text-secondary);
 }
-.input-bar .btn {
-    font-size: 16px;
-}
 .send-btn {
     background: var(--gold);
     color: #000;
@@ -919,7 +911,6 @@ body {
     height: 34px;
     border-radius: 50%;
     cursor: pointer;
-    font-size: 16px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -929,10 +920,8 @@ body {
 .send-btn:active {
     transform: scale(0.9);
 }
-.send-btn:disabled {
-    opacity: 0.5;
-}
 
+/* ===== POSTS ===== */
 .post-card {
     background: var(--bg2);
     margin: 8px 12px;
@@ -1078,6 +1067,7 @@ body {
     font-size: 12px;
 }
 
+/* ===== PROFILE ===== */
 .profile-section {
     text-align: center;
     padding: 24px;
@@ -1121,1123 +1111,4 @@ body {
 }
 .profile-status {
     font-size: 12px;
-    margin-top: 2px;
-    color: #4CAF50;
-}
-
-.settings-group {
-    padding: 0 12px 12px;
-}
-.setting-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 14px 16px;
-    background: var(--bg2);
-    margin-bottom: 6px;
-    border-radius: 10px;
-    cursor: pointer;
-    transition: background 0.15s;
-}
-.setting-item:active {
-    background: var(--bg3);
-}
-.setting-label {
-    font-size: 14px;
-}
-.setting-value {
-    color: var(--text-secondary);
-    font-size: 13px;
-}
-
-#loginScreen {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: var(--bg);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 100;
-}
-.login-card {
-    text-align: center;
-    padding: 32px 24px;
-    width: 90%;
-    max-width: 340px;
-}
-.login-logo {
-    font-size: 48px;
-    margin-bottom: 12px;
-}
-.login-card h1 {
-    font-size: 24px;
-    font-weight: 700;
-    color: var(--gold);
-}
-.login-card p {
-    color: var(--text-secondary);
-    font-size: 13px;
-    margin: 4px 0 20px;
-}
-.form-input {
-    width: 100%;
-    padding: 12px 14px;
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    color: var(--text);
-    font-size: 14px;
-    margin-bottom: 8px;
-    outline: none;
-    text-align: center;
-    transition: border 0.3s;
-}
-.form-input:focus {
-    border-color: var(--gold);
-}
-.form-input.error {
-    border-color: #ff4444;
-}
-.form-btn {
-    width: 100%;
-    padding: 12px;
-    background: var(--gold);
-    color: #000;
-    border: none;
-    border-radius: 10px;
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: opacity 0.2s;
-}
-.form-btn:active {
-    opacity: 0.8;
-}
-.form-link {
-    background: none;
-    border: none;
-    color: var(--gold);
-    font-size: 13px;
-    cursor: pointer;
-    margin-top: 10px;
-}
-.code-box {
-    background: var(--bg3);
-    padding: 12px;
-    border-radius: 8px;
-    font-size: 26px;
-    letter-spacing: 8px;
-    font-weight: 600;
-    color: var(--gold);
-    margin: 10px 0;
-    font-family: monospace;
-}
-.hidden {
-    display: none !important;
-}
-
-.media-viewer {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0,0,0,0.95);
-    z-index: 200;
-    display: none;
-    align-items: center;
-    justify-content: center;
-    padding: 20px;
-}
-.media-viewer.open {
-    display: flex;
-}
-.media-viewer img {
-    max-width: 100%;
-    max-height: 80vh;
-    object-fit: contain;
-}
-.media-viewer video {
-    max-width: 100%;
-    max-height: 80vh;
-}
-.media-close {
-    position: absolute;
-    top: 16px;
-    right: 16px;
-    width: 40px;
-    height: 40px;
-    border-radius: 50%;
-    background: rgba(255,255,255,0.1);
-    border: none;
-    color: #fff;
-    font-size: 20px;
-    cursor: pointer;
-}
-
-.notification {
-    position: fixed;
-    top: 0;
-    left: 50%;
-    transform: translateX(-50%);
-    background: var(--bg2);
-    color: var(--text);
-    padding: 10px 20px;
-    border-radius: 0 0 12px 12px;
-    font-size: 13px;
-    max-width: 90%;
-    text-align: center;
-    z-index: 50;
-    display: none;
-    border-bottom: 3px solid var(--gold);
-    box-shadow: 0 4px 20px rgba(0,0,0,0.6);
-    font-weight: 500;
-}
-.notification.show {
-    display: block;
-    animation: slideDown 0.3s ease;
-}
-@keyframes slideDown {
-    from { transform: translateX(-50%) translateY(-100%); }
-    to { transform: translateX(-50%) translateY(0); }
-}
-
-.fab {
-    position: fixed;
-    bottom: 80px;
-    right: 16px;
-    width: 48px;
-    height: 48px;
-    border-radius: 14px;
-    background: var(--gold);
-    color: #000;
-    border: none;
-    font-size: 24px;
-    cursor: pointer;
-    z-index: 20;
-    display: none;
-    align-items: center;
-    justify-content: center;
-    box-shadow: 0 4px 16px rgba(255,215,0,0.3);
-    transition: transform 0.2s;
-}
-.fab.show {
-    display: flex;
-}
-.fab:active {
-    transform: scale(0.9);
-}
-
-.empty-state {
-    text-align: center;
-    padding: 40px 20px;
-    color: var(--text-secondary);
-}
-.empty-state .icon {
-    font-size: 48px;
-    margin-bottom: 12px;
-}
-.empty-state h3 {
-    color: var(--text);
-    margin-bottom: 4px;
-}
-.empty-state p {
-    font-size: 13px;
-}
-
-.toast {
-    position: fixed;
-    bottom: 80px;
-    left: 50%;
-    transform: translateX(-50%);
-    background: var(--bg2);
-    padding: 10px 20px;
-    border-radius: 10px;
-    font-size: 13px;
-    z-index: 60;
-    border-left: 3px solid var(--gold);
-    box-shadow: 0 4px 20px rgba(0,0,0,0.6);
-    animation: fadeIn 0.3s ease;
-    max-width: 90%;
-}
-
-@media (max-width: 480px) {
-    .msg { max-width: 90%; }
-    .msg-bubble img, .msg-bubble video { max-width: 160px; }
-}
-</style>
-</head>
-<body>
-
-<div class="notification" id="notification"></div>
-
-<div id="app">
-
-    <div class="header">
-        <div class="header-left">
-            <span class="logo-icon">🎯</span>
-            <span class="logo" id="headerTitle">DirectMe</span>
-        </div>
-        <div class="header-right">
-            <button class="btn" onclick="shareApp()">📤</button>
-        </div>
-    </div>
-
-    <div class="page active" id="pageChats">
-        <div id="chatList"></div>
-    </div>
-
-    <div class="page" id="pageUsers">
-        <div style="padding:8px 12px;position:sticky;top:0;background:var(--bg);z-index:5">
-            <input class="form-input" id="searchUsers" placeholder="🔍 Поиск пользователей..." oninput="searchUsers()" style="text-align:left">
-        </div>
-        <div id="usersList"></div>
-    </div>
-
-    <div class="page" id="pagePosts">
-        <div id="postsList"></div>
-    </div>
-
-    <div class="page" id="pageSettings">
-        <div id="settingsContent"></div>
-    </div>
-
-    <div id="chatWindow">
-        <div class="header" style="border-bottom:1px solid var(--border);flex-shrink:0">
-            <button class="btn" onclick="closeChat()">←</button>
-            <span style="font-weight:500;flex:1;font-size:15px" id="chatTitle">Чат</span>
-            <button class="btn" onclick="deleteChat()">🗑</button>
-        </div>
-        <div class="messages-container" id="messagesContainer"></div>
-        <div class="typing-indicator" id="typingIndicator"></div>
-        <div class="input-bar">
-            <button class="btn" onclick="document.getElementById('fileInput').click()">📎</button>
-            <input type="text" id="msgInput" placeholder="Сообщение..." onkeypress="if(event.key==='Enter')sendMessage()" oninput="handleTyping()">
-            <button class="send-btn" onclick="sendMessage()">➤</button>
-        </div>
-    </div>
-
-    <div class="nav" id="nav" style="display:none">
-        <div class="nav-item active" onclick="switchPage('chats')">
-            <span class="icon">💬</span>
-            <span class="label">Чаты</span>
-            <span class="badge" id="totalBadge" style="display:none">0</span>
-        </div>
-        <div class="nav-item" onclick="switchPage('users')">
-            <span class="icon">👤</span>
-            <span class="label">Люди</span>
-        </div>
-        <div class="nav-item" onclick="switchPage('posts')">
-            <span class="icon">📸</span>
-            <span class="label">Посты</span>
-        </div>
-        <div class="nav-item" onclick="switchPage('settings')">
-            <span class="icon">⚙️</span>
-            <span class="label">Настройки</span>
-        </div>
-    </div>
-
-    <button class="fab" id="fab" onclick="createPost()">+</button>
-</div>
-
-<div class="media-viewer" id="mediaViewer">
-    <button class="media-close" onclick="closeMedia()">✕</button>
-    <img id="mediaImg" style="display:none">
-    <video id="mediaVideo" controls style="display:none"></video>
-</div>
-
-<input type="file" id="fileInput" accept="image/*,video/*" style="display:none" onchange="handleFile(event)">
-<input type="file" id="avatarInput" accept="image/*" style="display:none" onchange="handleAvatar(event)">
-<input type="file" id="postInput" accept="image/*,video/*" style="display:none" onchange="handlePost(event)">
-
-<div id="loginScreen">
-    <div class="login-card">
-        <div id="loginStep1">
-            <div class="login-logo">🎯</div>
-            <h1>DirectMe</h1>
-            <p>Введите номер телефона для входа</p>
-            <input class="form-input" id="phoneInput" placeholder="+7 999 123-45-67" type="tel">
-            <button class="form-btn" onclick="requestCode()">Получить код</button>
-        </div>
-        <div id="loginStep2" class="hidden">
-            <div class="login-logo">🎯</div>
-            <h1>Код</h1>
-            <p>Отправлен на <span id="phoneDisplay" style="color:var(--gold)"></span></p>
-            <div class="code-box" id="codeDisplay">000000</div>
-            <input class="form-input" id="codeInput" placeholder="••••••" maxlength="6" style="font-size:20px;letter-spacing:6px">
-            <button class="form-btn" onclick="verifyCode()">Подтвердить</button>
-            <button class="form-link" onclick="backToPhone()">Изменить номер</button>
-        </div>
-        <div id="loginStep3" class="hidden">
-            <div class="login-logo">🎯</div>
-            <h1>Регистрация</h1>
-            <input class="form-input" id="regPassword" placeholder="Пароль (мин. 4 символа)" type="password">
-            <input class="form-input" id="regName" placeholder="Имя пользователя (2-20 символов)">
-            <button class="form-btn" onclick="registerUser()">Зарегистрироваться</button>
-        </div>
-        <div id="loginStep4" class="hidden">
-            <div class="login-logo">🎯</div>
-            <h1>Вход</h1>
-            <p id="loginName" style="color:var(--gold);font-weight:600"></p>
-            <input class="form-input" id="loginPassword" placeholder="Пароль" type="password">
-            <button class="form-btn" onclick="loginUser()">Войти</button>
-            <button class="form-link" onclick="backToStart()">Назад</button>
-        </div>
-    </div>
-</div>
-
-<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-<script>
-const socket = io();
-let currentUser = null;
-let currentToken = null;
-let currentChat = 'general';
-let currentChatName = 'Общий чат';
-let currentAvatar = null;
-let currentBio = '';
-let typingTimeout = null;
-let unreadData = {};
-let privateChats = JSON.parse(localStorage.getItem('private_chats') || '[]');
-let isChatOpen = false;
-
-const $ = id => document.getElementById(id);
-const notification = $('notification');
-const loginScreen = $('loginScreen');
-const nav = $('nav');
-const pageChats = $('pageChats');
-const pageUsers = $('pageUsers');
-const pagePosts = $('pagePosts');
-const pageSettings = $('pageSettings');
-const chatWindow = $('chatWindow');
-const messagesContainer = $('messagesContainer');
-const chatTitle = $('chatTitle');
-const msgInput = $('msgInput');
-const typingIndicator = $('typingIndicator');
-const chatList = $('chatList');
-const usersList = $('usersList');
-const postsList = $('postsList');
-const settingsContent = $('settingsContent');
-const fab = $('fab');
-const totalBadge = $('totalBadge');
-
-function showNotification(msg) {
-    notification.textContent = msg;
-    notification.classList.add('show');
-    clearTimeout(notification._timeout);
-    notification._timeout = setTimeout(() => notification.classList.remove('show'), 3000);
-}
-
-function showToast(msg) {
-    const el = document.createElement('div');
-    el.className = 'toast';
-    el.textContent = msg;
-    document.body.appendChild(el);
-    setTimeout(() => el.remove(), 2500);
-}
-
-function requestCode() {
-    const phone = $('phoneInput').value.trim();
-    if (phone.length < 10) {
-        showNotification('Введите корректный номер');
-        return;
-    }
-    socket.emit('register', { phone });
-}
-
-function verifyCode() {
-    const code = $('codeInput').value.trim();
-    if (code.length !== 6) {
-        showNotification('Введите 6 цифр');
-        return;
-    }
-    socket.emit('verify_code', { phone: currentPhone, code });
-}
-
-let currentPhone = '';
-
-function registerUser() {
-    const name = $('regName').value.trim();
-    const password = $('regPassword').value.trim();
-    if (!name || name.length < 2 || name.length > 20) {
-        showNotification('Имя должно быть 2-20 символов');
-        return;
-    }
-    if (!/^[a-zA-Zа-яА-Я0-9_]+$/.test(name)) {
-        showNotification('Недопустимые символы в имени');
-        return;
-    }
-    if (password.length < 4) {
-        showNotification('Пароль минимум 4 символа');
-        return;
-    }
-    socket.emit('create_user', { phone: currentPhone, name, password });
-}
-
-function loginUser() {
-    const password = $('loginPassword').value.trim();
-    if (!password) {
-        showNotification('Введите пароль');
-        return;
-    }
-    socket.emit('login', { name: currentLoginName, password });
-}
-
-let currentLoginName = '';
-
-function backToPhone() {
-    $('loginStep2').classList.add('hidden');
-    $('loginStep1').classList.remove('hidden');
-}
-
-function backToStart() {
-    $('loginStep4').classList.add('hidden');
-    $('loginStep1').classList.remove('hidden');
-}
-
-socket.on('code_sent', (data) => {
-    currentPhone = data.phone;
-    $('loginStep1').classList.add('hidden');
-    $('loginStep2').classList.remove('hidden');
-    $('phoneDisplay').textContent = '+' + data.phone;
-    $('codeDisplay').textContent = data.code;
-});
-
-socket.on('user_exists', (data) => {
-    currentLoginName = data.name;
-    $('loginStep2').classList.add('hidden');
-    $('loginStep4').classList.remove('hidden');
-    $('loginName').textContent = data.name;
-});
-
-socket.on('new_user', (data) => {
-    currentPhone = data.phone;
-    $('loginStep2').classList.add('hidden');
-    $('loginStep3').classList.remove('hidden');
-});
-
-socket.on('login_success', (data) => {
-    currentUser = data.name;
-    currentToken = data.token;
-    currentAvatar = data.avatar;
-    localStorage.setItem('shugramm_token', data.token);
-    localStorage.setItem('shugramm_user', data.name);
-    enterApp();
-});
-
-socket.on('error', (data) => {
-    showNotification(data.message);
-});
-
-socket.on('user_joined', (data) => {
-    renderUsers();
-    renderChats();
-});
-
-socket.on('user_status', (data) => {
-    renderUsers();
-    renderChats();
-});
-
-socket.on('new_message', (data) => {
-    if (data.chat === currentChat && isChatOpen) {
-        renderMessage(data.message);
-        scrollToBottom();
-    }
-    if (data.chat !== currentChat || !isChatOpen) {
-        unreadData[data.chat] = (unreadData[data.chat] || 0) + 1;
-        updateBadge();
-    }
-    renderChats();
-});
-
-socket.on('chat_history', (data) => {
-    messagesContainer.innerHTML = '';
-    if (data.messages) {
-        data.messages.forEach(m => renderMessage(m));
-        scrollToBottom();
-    }
-});
-
-socket.on('typing_status', (data) => {
-    if (data.typing) {
-        typingIndicator.textContent = data.name + ' печатает...';
-        typingIndicator.classList.add('show');
-    } else {
-        typingIndicator.classList.remove('show');
-    }
-});
-
-socket.on('users_list', (data) => {
-    renderUsersList(data.users);
-});
-
-socket.on('private_chat', (data) => {
-    openPrivateChat(data.chat_id, data.user, data.avatar, data.messages);
-});
-
-socket.on('avatar_updated', (data) => {
-    if (data.name === currentUser) {
-        currentAvatar = data.avatar;
-    }
-    renderChats();
-    renderUsers();
-});
-
-socket.on('bio_updated', (data) => {
-    if (data.name === currentUser) {
-        currentBio = data.bio;
-        renderSettings();
-    }
-});
-
-socket.on('new_post', (data) => {
-    if (document.getElementById('pagePosts').classList.contains('active')) {
-        postsList.insertAdjacentHTML('afterbegin', renderPost(data.post));
-    }
-});
-
-socket.on('posts_list', (data) => {
-    postsList.innerHTML = data.posts.length ? data.posts.map(p => renderPost(p)).join('') : 
-        '<div class="empty-state"><div class="icon">📸</div><h3>Нет постов</h3><p>Создайте свой первый пост!</p></div>';
-});
-
-socket.on('post_updated', (data) => {
-    const el = document.getElementById('post-' + data.post.id);
-    if (el) {
-        el.outerHTML = renderPost(data.post);
-    }
-});
-
-socket.on('message_deleted', (data) => {
-    if (data.chat === currentChat) {
-        const el = document.querySelector(`[data-msg-id="${data.msg_id}"]`);
-        if (el) el.remove();
-    }
-});
-
-socket.on('message_edited', (data) => {
-    if (data.chat === currentChat) {
-        const el = document.querySelector(`[data-msg-id="${data.message.id}"]`);
-        if (el) {
-            const bubble = el.querySelector('.msg-bubble');
-            if (bubble) {
-                bubble.innerHTML = data.message.content + '<span class="edited">✎</span>';
-            }
-        }
-    }
-});
-
-socket.on('share_link', (data) => {
-    const url = 'https://' + data.url;
-    if (navigator.clipboard) {
-        navigator.clipboard.writeText(url).then(() => showToast('Ссылка скопирована!'));
-    } else {
-        prompt('Ссылка:', url);
-    }
-});
-
-const savedToken = localStorage.getItem('shugramm_token');
-const savedUser = localStorage.getItem('shugramm_user');
-if (savedToken && savedUser) {
-    socket.emit('auto_login', { token: savedToken });
-}
-
-function enterApp() {
-    loginScreen.classList.add('hidden');
-    nav.style.display = 'flex';
-    fab.classList.add('show');
-    renderChats();
-    renderUsers();
-    renderSettings();
-    socket.emit('get_posts');
-    setInterval(() => socket.emit('get_users', { name: currentUser }), 30000);
-}
-
-function switchPage(page) {
-    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-    
-    if (page === 'chats') {
-        pageChats.classList.add('active');
-        document.querySelector('.nav-item:nth-child(1)').classList.add('active');
-        renderChats();
-        fab.classList.add('show');
-    } else if (page === 'users') {
-        pageUsers.classList.add('active');
-        document.querySelector('.nav-item:nth-child(2)').classList.add('active');
-        socket.emit('get_users', { name: currentUser });
-        fab.classList.remove('show');
-    } else if (page === 'posts') {
-        pagePosts.classList.add('active');
-        document.querySelector('.nav-item:nth-child(3)').classList.add('active');
-        socket.emit('get_posts');
-        fab.classList.add('show');
-    } else {
-        pageSettings.classList.add('active');
-        document.querySelector('.nav-item:nth-child(4)').classList.add('active');
-        renderSettings();
-        fab.classList.remove('show');
-    }
-    
-    if (isChatOpen) {
-        chatWindow.classList.remove('open');
-        chatWindow.style.display = 'none';
-        isChatOpen = false;
-    }
-}
-
-function renderChats() {
-    let html = `
-        <div class="chat-item" onclick="openChat('general', 'Общий чат')">
-            <div class="chat-avatar">#</div>
-            <div class="chat-info">
-                <div class="chat-name">Общий чат</div>
-                <div class="chat-last">Нажмите чтобы открыть</div>
-            </div>
-            ${unreadData['general'] ? `<div class="chat-unread">${unreadData['general']}</div>` : ''}
-        </div>
-    `;
-    
-    privateChats.forEach(c => {
-        const ur = unreadData[c.id] || 0;
-        html += `
-            <div class="chat-item" onclick="openPrivateChat('${c.id}', '${c.name}')">
-                <div class="chat-avatar">${c.avatar || c.name[0]}</div>
-                <div class="chat-info">
-                    <div class="chat-name">${c.name}</div>
-                    <div class="chat-last">${c.lastMsg || 'Нажмите чтобы открыть'}</div>
-                </div>
-                ${ur ? `<div class="chat-unread">${ur}</div>` : ''}
-            </div>
-        `;
-    });
-    
-    chatList.innerHTML = html;
-    updateBadge();
-}
-
-function renderUsers() {
-    socket.emit('get_users', { name: currentUser });
-}
-
-function renderUsersList(users) {
-    if (!users || !users.length) {
-        usersList.innerHTML = '<div class="empty-state"><div class="icon">👤</div><h3>Нет пользователей</h3></div>';
-        return;
-    }
-    usersList.innerHTML = users.map(u => `
-        <div class="chat-item" onclick="startPrivateChat('${u.name}')">
-            <div class="chat-avatar">
-                ${u.avatar ? `<img src="${u.avatar}">` : u.name[0]}
-                ${u.status === 'online' ? '<span class="online-dot"></span>' : ''}
-            </div>
-            <div class="chat-info">
-                <div class="chat-name">${u.name}</div>
-                <div class="chat-last">${u.bio || 'Привет!'}</div>
-            </div>
-        </div>
-    `).join('');
-}
-
-function searchUsers() {
-    const query = document.getElementById('searchUsers').value.toLowerCase();
-    const items = usersList.querySelectorAll('.chat-item');
-    items.forEach(el => {
-        const name = el.querySelector('.chat-name').textContent.toLowerCase();
-        el.style.display = name.includes(query) ? 'flex' : 'none';
-    });
-}
-
-function openChat(chat, name) {
-    currentChat = chat;
-    currentChatName = name;
-    isChatOpen = true;
-    
-    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-    chatWindow.classList.add('open');
-    chatWindow.style.display = 'flex';
-    chatTitle.textContent = name;
-    messagesContainer.innerHTML = '';
-    
-    if (unreadData[chat]) {
-        unreadData[chat] = 0;
-        updateBadge();
-    }
-    
-    socket.emit('join_chat', { chat, name: currentUser });
-    msgInput.focus();
-}
-
-function openPrivateChat(chatId, name) {
-    currentChat = chatId;
-    currentChatName = name;
-    isChatOpen = true;
-    
-    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-    chatWindow.classList.add('open');
-    chatWindow.style.display = 'flex';
-    chatTitle.textContent = name;
-    messagesContainer.innerHTML = '';
-    
-    if (unreadData[chatId]) {
-        unreadData[chatId] = 0;
-        updateBadge();
-    }
-    
-    socket.emit('join_chat', { chat: chatId, name: currentUser });
-    msgInput.focus();
-}
-
-function startPrivateChat(name) {
-    if (name === currentUser) return;
-    socket.emit('start_private_chat', { user1: currentUser, user2: name });
-}
-
-function openPrivateChatData(chatId, user, avatar, messages) {
-    currentChat = chatId;
-    currentChatName = user;
-    isChatOpen = true;
-    
-    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-    chatWindow.classList.add('open');
-    chatWindow.style.display = 'flex';
-    chatTitle.textContent = user;
-    messagesContainer.innerHTML = '';
-    
-    if (messages) {
-        messages.forEach(m => renderMessage(m));
-        scrollToBottom();
-    }
-    
-    const exists = privateChats.some(c => c.id === chatId);
-    if (!exists) {
-        privateChats.push({ id: chatId, name: user, avatar: avatar || user[0], lastMsg: '' });
-        localStorage.setItem('private_chats', JSON.stringify(privateChats));
-    }
-    
-    if (unreadData[chatId]) {
-        unreadData[chatId] = 0;
-        updateBadge();
-    }
-    
-    msgInput.focus();
-}
-
-function closeChat() {
-    chatWindow.classList.remove('open');
-    chatWindow.style.display = 'none';
-    isChatOpen = false;
-    document.getElementById('pageChats').classList.add('active');
-    document.querySelector('.nav-item:nth-child(1)').classList.add('active');
-    renderChats();
-}
-
-function deleteChat() {
-    if (!confirm('Удалить чат из списка?')) return;
-    privateChats = privateChats.filter(c => c.id !== currentChat);
-    localStorage.setItem('private_chats', JSON.stringify(privateChats));
-    closeChat();
-}
-
-function sendMessage() {
-    const text = msgInput.value.trim();
-    if (!text) return;
-    socket.emit('send_message', {
-        name: currentUser,
-        chat: currentChat,
-        type: 'text',
-        content: text
-    });
-    msgInput.value = '';
-    socket.emit('typing', { chat: currentChat, name: currentUser, typing: false });
-}
-
-function handleTyping() {
-    if (typingTimeout) clearTimeout(typingTimeout);
-    socket.emit('typing', { chat: currentChat, name: currentUser, typing: true });
-    typingTimeout = setTimeout(() => {
-        socket.emit('typing', { chat: currentChat, name: currentUser, typing: false });
-    }, 1500);
-}
-
-function handleFile(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-        socket.emit('send_message', {
-            name: currentUser,
-            chat: currentChat,
-            type: file.type.startsWith('video') ? 'video' : 'image',
-            content: ev.target.result
-        });
-    };
-    reader.readAsDataURL(file);
-    e.target.value = '';
-}
-
-function renderMessage(msg) {
-    const isSelf = msg.name === currentUser;
-    const div = document.createElement('div');
-    div.className = 'msg' + (isSelf ? ' self' : '');
-    div.dataset.msgId = msg.id;
-    
-    let content = msg.content;
-    if (msg.type === 'image') {
-        content = `<img src="${msg.content}" onclick="openMedia('${msg.content}', 'image')">`;
-    } else if (msg.type === 'video') {
-        content = `<video src="${msg.content}" controls></video>`;
-    } else {
-        content = msg.content.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    }
-    
-    const avatar = msg.avatar ? `<img src="${msg.avatar}">` : msg.name[0];
-    const actions = isSelf ? `
-        <div class="msg-actions">
-            <button onclick="editMessage('${msg.id}')">✎</button>
-            <button onclick="deleteMessage('${msg.id}')">✕</button>
-        </div>
-    ` : '';
-    
-    div.innerHTML = `
-        <div class="msg-avatar">${avatar}</div>
-        <div>
-            <div class="msg-bubble">${content}${msg.edited ? '<span class="edited">✎</span>' : ''}</div>
-            <div class="msg-time">${msg.time}</div>
-            ${actions}
-        </div>
-    `;
-    messagesContainer.appendChild(div);
-}
-
-function deleteMessage(msgId) {
-    if (!confirm('Удалить сообщение?')) return;
-    socket.emit('delete_message', { chat: currentChat, msg_id: msgId, name: currentUser });
-}
-
-function editMessage(msgId) {
-    const newText = prompt('Редактировать сообщение:');
-    if (newText && newText.trim()) {
-        socket.emit('edit_message', { 
-            chat: currentChat, 
-            msg_id: msgId, 
-            name: currentUser, 
-            content: newText.trim() 
-        });
-    }
-}
-
-function scrollToBottom() {
-    setTimeout(() => {
-        messagesContainer.scrollTop = messagesContainer.scrollHeight;
-    }, 50);
-}
-
-function createPost() {
-    document.getElementById('postInput').click();
-}
-
-function handlePost(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    const caption = prompt('Описание:') || '';
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-        socket.emit('create_post', {
-            name: currentUser,
-            content: ev.target.result,
-            media_type: file.type.startsWith('video') ? 'video' : 'image',
-            caption: caption
-        });
-        showNotification('Пост опубликован!');
-    };
-    reader.readAsDataURL(file);
-    e.target.value = '';
-}
-
-function renderPost(p) {
-    const isLiked = p.likes && p.likes.includes(currentUser);
-    const isAuthor = p.author === currentUser;
-    const avatar = p.avatar ? `<img src="${p.avatar}">` : p.author[0];
-    
-    return `
-        <div class="post-card" id="post-${p.id}">
-            <div class="post-header">
-                <div class="post-avatar">${avatar}</div>
-                <div>
-                    <div class="post-author">${p.author}</div>
-                    <div class="post-time">${p.time}</div>
-                </div>
-                ${isAuthor ? `<button class="btn" onclick="deletePost('${p.id}')" style="margin-left:auto;color:#ff4444">✕</button>` : ''}
-            </div>
-            ${p.media_type === 'image' ? `<img class="post-media" src="${p.content}" onclick="openMedia('${p.content}', 'image')">` : ''}
-            ${p.media_type === 'video' ? `<video class="post-media" src="${p.content}" controls></video>` : ''}
-            <div class="post-caption">${p.caption ? p.caption : ''}</div>
-            <div class="post-actions">
-                <button class="post-action ${isLiked ? 'liked' : ''}" onclick="likePost('${p.id}')">
-                    ${isLiked ? '❤️' : '🤍'} <span class="count">${(p.likes || []).length}</span>
-                </button>
-                <button class="post-action" onclick="toggleComments('${p.id}')">
-                    💬 <span class="count">${(p.comments || []).length}</span>
-                </button>
-            </div>
-            <div class="post-comments" id="comments-${p.id}" style="${(p.comments || []).length ? '' : 'display:none'}">
-                ${(p.comments || []).map(c => `
-                    <div class="post-comment">
-                        <div class="post-comment-avatar">${c.avatar ? `<img src="${c.avatar}">` : c.name[0]}</div>
-                        <div class="post-comment-text"><b>${c.name}</b> ${c.comment}</div>
-                    </div>
-                `).join('')}
-            </div>
-            <div class="comment-input">
-                <input id="comment-${p.id}" placeholder="Написать комментарий..." onkeypress="if(event.key==='Enter')sendComment('${p.id}')">
-                <button onclick="sendComment('${p.id}')">Отправить</button>
-            </div>
-        </div>
-    `;
-}
-
-function likePost(postId) {
-    socket.emit('like_post', { post_id: postId, name: currentUser });
-}
-
-function sendComment(postId) {
-    const input = document.getElementById('comment-' + postId);
-    const text = input.value.trim();
-    if (!text) return;
-    socket.emit('comment_post', { post_id: postId, name: currentUser, comment: text });
-    input.value = '';
-}
-
-function toggleComments(postId) {
-    const el = document.getElementById('comments-' + postId);
-    if (el) {
-        el.style.display = el.style.display === 'none' ? 'block' : 'none';
-    }
-}
-
-function deletePost(postId) {
-    if (!confirm('Удалить пост?')) return;
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/delete_post', true);
-    xhr.setRequestHeader('Content-Type', 'application/json');
-    xhr.send(JSON.stringify({ pid: postId, n: currentUser }));
-    setTimeout(() => socket.emit('get_posts'), 500);
-}
-
-function renderSettings() {
-    const avatar = currentAvatar ? `<img src="${currentAvatar}">` : (currentUser ? currentUser[0] : '?');
-    settingsContent.innerHTML = `
-        <div class="profile-section">
-            <div class="profile-avatar" onclick="document.getElementById('avatarInput').click()">
-                ${avatar}
-            </div>
-            <div class="profile-name">${currentUser || 'Гость'}</div>
-            <div class="profile-bio">${currentBio || 'Нажмите чтобы добавить описание'}</div>
-            <div class="profile-status">🟢 Онлайн</div>
-        </div>
-        <div class="settings-group">
-            <div class="setting-item" onclick="editBio()">
-                <span class="setting-label">✏️ Редактировать описание</span>
-            </div>
-            <div class="setting-item" onclick="shareApp()">
-                <span class="setting-label">🔗 Поделиться приложением</span>
-            </div>
-            <div class="setting-item" onclick="logout()" style="border-left:3px solid #ff4444">
-                <span class="setting-label" style="color:#ff4444">🚪 Выйти</span>
-            </div>
-        </div>
-    `;
-}
-
-function editBio() {
-    const bio = prompt('Введите описание:', currentBio || '');
-    if (bio !== null) {
-        currentBio = bio;
-        socket.emit('update_bio', { name: currentUser, bio });
-        renderSettings();
-    }
-}
-
-function handleAvatar(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-        currentAvatar = ev.target.result;
-        socket.emit('update_avatar', { name: currentUser, avatar: ev.target.result });
-        renderSettings();
-        showNotification('Аватар обновлен!');
-    };
-    reader.readAsDataURL(file);
-    e.target.value = '';
-}
-
-function logout() {
-    if (!confirm('Выйти из аккаунта?')) return;
-    socket.emit('logout', { token: currentToken });
-    localStorage.removeItem('shugramm_token');
-    localStorage.removeItem('shugramm_user');
-    currentUser = null;
-    currentToken = null;
-    location.reload();
-}
-
-function shareApp() {
-    socket.emit('share_link');
-}
-
-function openMedia(src, type) {
-    const viewer = document.getElementById('mediaViewer');
-    viewer.classList.add('open');
-    if (type === 'image') {
-        document.getElementById('mediaImg').src = src;
-        document.getElementById('mediaImg').style.display = 'block';
-        document.getElementById('mediaVideo').style.display = 'none';
-    } else {
-        document.getElementById('mediaVideo').src = src;
-        document.getElementById('mediaVideo').style.display = 'block';
-        document.getElementById('mediaImg').style.display = 'none';
-        document.getElementById('mediaVideo').play();
-    }
-}
-
-function closeMedia() {
-    document.getElementById('mediaViewer').classList.remove('open');
-    document.getElementById('mediaVideo').pause();
-}
-
-function updateBadge() {
-    let total = 0;
-    for (const key in unreadData) {
-        total += unreadData[key] || 0;
-    }
-    if (total > 0) {
-        totalBadge.textContent = total;
-        totalBadge.style.display = 'flex';
-    } else {
-        totalBadge.style.display = 'none';
-    }
-}
-
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-        if (document.getElementById('mediaViewer').classList.contains('open')) {
-            closeMedia();
-        } else if (isChatOpen) {
-            closeChat();
-        }
-    }
-});
-
-console.log('🎯 DirectMe загружен!');
-</script>
-</body>
-</html>'''
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
+    margin-top: 
