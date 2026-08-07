@@ -1,45 +1,10 @@
-# Python
+.env
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-.Python
-*.so
-*.egg
-*.egg-info/
-dist/
-build/
-*.log
-
-# Виртуальное окружение
-env/
+*.db
+.DS_Store
 venv/
 .venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Данные (важно!)
-directme_data.json
-*.db
-*.sqlite3
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Переменные окружения
-.env
-.env.local
-.env.*.local
-
-# Railway
-.railway/
-
-# Replit
-.replit
-replit.nix
+data/
+logs/
+*.log
