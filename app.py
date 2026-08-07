@@ -1880,6 +1880,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 console.log('💬 DirectMe загружен!');
+</script>
 <script>
 // ===== ЭКСТРЕННЫЙ ФИКС ДЛЯ SAFARI iOS =====
 document.addEventListener('DOMContentLoaded', function() {
@@ -1917,7 +1918,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 </script>
-</script>
+
 </body>
 </html>
 '''
