@@ -1099,7 +1099,7 @@ def create_story(data):
             'type': media_type,
             'timestamp': time.time(),
             'views': []
-        });
+        }
         
         stories.setdefault(name, []).append(story)
         
