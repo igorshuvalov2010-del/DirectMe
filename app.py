@@ -2250,9 +2250,8 @@ document.addEventListener('keydown', (e) => {
         else if (isChatOpen) closeChat();
     }
 });
-
 console.log('💬 DirectMe загружен!');
-</script>
+    </script>
 </body>
 </html>
 '''
