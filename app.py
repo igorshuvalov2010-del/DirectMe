@@ -1102,7 +1102,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, syste
             <p>Введите юзернейм и пароль</p>
             <input class="form-input" id="regUsername" placeholder="Юзернейм (латиница, 3-20 символов)">
             <input class="form-input" id="regPassword" placeholder="Пароль (мин. 4)" type="password">
-            <button class="form-btn" onclick="loginOrRegister()" type="button">Войти / Зарегистрироваться</button>
+            <button class="form-btn" type="button" id="loginBtn">Войти / Зарегистрироваться</button>
         </div>
     </div>
 </div>
@@ -1882,41 +1882,89 @@ document.addEventListener('keydown', (e) => {
 console.log('💬 DirectMe загружен!');
 </script>
 <script>
-// ===== ЭКСТРЕННЫЙ ФИКС ДЛЯ SAFARI iOS =====
+// ============================================================
+//  РАБОЧАЯ КНОПКА (БЕЗ ONCLICK)
+// ============================================================
+
+// Функция которая будет вызываться
+function doLoginOrRegister() {
+    console.log('🚀 Кнопка нажата!');
+    
+    var username = document.getElementById('regUsername').value.trim().toLowerCase();
+    var password = document.getElementById('regPassword').value.trim();
+    
+    if (!username || username.length < 3 || username.length > 20) {
+        showToast('Юзернейм 3-20 символов (латиница, цифры, _)');
+        return;
+    }
+    if (!/^[a-zA-Z0-9_]+$/.test(username)) {
+        showToast('Юзернейм: только латиница, цифры, _');
+        return;
+    }
+    if (password.length < 4) {
+        showToast('Пароль минимум 4 символа');
+        return;
+    }
+    
+    // Пытаемся войти
+    socket.emit('login', { username: username, password: password });
+    
+    var registered = false;
+    socket.once('login_success', function() {
+        registered = true;
+        console.log('✅ Вход выполнен!');
+    });
+    socket.once('error', function(data) {
+        console.log('❌ Ошибка:', data.message);
+        if (data.message === 'Пользователь не найден' && !registered) {
+            console.log('🆕 Регистрируем...');
+            socket.emit('register', { username: username, password: password });
+        }
+    });
+}
+
+// Ждём загрузку страницы
 document.addEventListener('DOMContentLoaded', function() {
-    var btn = document.querySelector('.form-btn');
-    if (btn) {
-        btn.setAttribute('type', 'button');
+    console.log('📄 Страница загружена!');
+    
+    // Находим кнопку
+    var btn = document.getElementById('loginBtn');
+    if (!btn) {
+        console.log('❌ Кнопка не найдена!');
+        return;
+    }
+    console.log('✅ Кнопка найдена!');
+    
+    // ВЕШАЕМ ОБРАБОТЧИК (РАБОТАЕТ ВСЕГДА)
+    btn.addEventListener('click', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        doLoginOrRegister();
+    });
+    
+    // ДОПОЛНИТЕЛЬНО: вешаем на весь документ (на случай если кнопка не нажалась)
+    document.addEventListener('click', function(e) {
+        if (e.target === btn || e.target.closest('#loginBtn')) {
+            doLoginOrRegister();
+        }
+    });
+    
+    console.log('✅ Кнопка готова!');
+});
+
+// НА ВСЯКИЙ СЛУЧАЙ: если DOM уже загружен
+if (document.readyState === 'complete' || document.readyState === 'interactive') {
+    var btn = document.getElementById('loginBtn');
+    if (btn && !btn._listener) {
+        btn._listener = true;
         btn.addEventListener('click', function(e) {
             e.preventDefault();
-            var username = document.getElementById('regUsername').value.trim().toLowerCase();
-            var password = document.getElementById('regPassword').value.trim();
-            
-            if (!username || username.length < 3 || username.length > 20) {
-                showToast('Юзернейм 3-20 символов');
-                return;
-            }
-            if (!/^[a-zA-Z0-9_]+$/.test(username)) {
-                showToast('Юзернейм: латиница, цифры, _');
-                return;
-            }
-            if (password.length < 4) {
-                showToast('Пароль минимум 4 символа');
-                return;
-            }
-            
-            socket.emit('login', { username: username, password: password });
-            var registered = false;
-            socket.once('login_success', function() { registered = true; });
-            socket.once('error', function(data) {
-                if (data.message === 'Пользователь не найден' && !registered) {
-                    socket.emit('register', { username: username, password: password });
-                }
-            });
+            doLoginOrRegister();
         });
-        console.log('✅ Кнопка починена для Safari!');
     }
-});
+}
+
+console.log('💬 Скрипт загружен!');
 </script>
 
 </body>
